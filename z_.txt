@@ -1,0 +1,245 @@
+export BLOCK=/dev/nvme0n1
+export VIRTGB=1024     # >= device size in GB (894GB)
+export PHYSGB=16       # adjust to your available RAM
+export REMOTEGB=0      # no remote tier
+export THREADS=8
+export DATASIZE=10     # warehouses
+export RNDREAD=0
+export RUNFOR=30
+
+./vmcache
+
+
+
+
+
+
+
+BufferManager Initialization & Related Functions
+
+  1. Constructor: BufferManager::BufferManager() (lines 716-854)
+
+  INITIALIZATION SEQUENCE
+  ├─ Parse Environment Variables
+  │  ├─ Memory sizing: VIRTGB (16), PHYSGB (4), REMOTEGB (0)
+  │  ├─ NUMA nodes: DRAM_NODE (0), REMOTE_NODE (1)
+  │  ├─ Migration policy: DRAM_READ/WRITE_RATIO, NUMA_READ/WRITE_RATIO (all default 1.0)
+  │  ├─ Promotion: PROMOTE_BATCH (64), PROMOTE_BATCH_SIZE_MAX (256)
+  │  └─ Migration methods: NUMA_MIGRATE_METHOD (2), NUMA_MIGRATE_BATCH_SIZE (64), MOVE_PAGES2_MODE (0)
+  │
+  ├─ Validate NUMA Nodes
+  │  └─ Check that DRAM_NODE and REMOTE_NODE exist with numa_node_exists()
+  │
+  ├─ Create BufferPool Hierarchy
+  │  ├─ dramPool = BufferPool(physCount, dramNode, batch)  // Primary tier
+  │  └─ if (remoteSize > 0): remotePool = BufferPool(remotePhysCount, remoteNode, batch)
+  │     └─ Chain: dramPool→targetPool = remotePool (DRAM → REMOTE → SSD)
+  │
+  ├─ Initialize Virtual Memory
+  │  ├─ if (useExmap):
+  │  │  ├─ open("/dev/exmap")
+  │  │  ├─ ioctl(EXMAP_IOCTL_SETUP, ...)
+  │  │  └─ mmap shared with exmap device for each worker thread
+  │  └─ else:
+  │     └─ mmap private anonymous memory (non-HUGE)
+  │
+  ├─ Allocate PageState Array
+  │  ├─ pageState = huge-page allocation for virtCount entries
+  │  └─ Initialize each: pageState[i].init()
+  │
+  ├─ Initialize I/O Interfaces
+  │  ├─ Open block device: BLOCK="/tmp/bm"
+  │  ├─ libaioInterface for each worker thread
+  │  └─ Set blockfd from open()
+  │
+  └─ Initialize Statistics
+     ├─ allocCount = 1 (PID 0 reserved for metadata)
+     ├─ readCount = 0
+     ├─ writeCount = 0
+     ├─ promotions = 0
+     ├─ demotions = 0
+     └─ evictionsToSSD = 0
+
+  2. Key Member Variables
+  ┌───────────────────────┬─────────────┬─────────────────────────────────────┐
+  │       Variable        │    Type     │               Purpose               │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ virtMem               │ Page*       │ Virtual address space for all pages │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ pageState             │ PageState*  │ State/lock/tier info for each page  │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ dramPool              │ BufferPool* │ Primary DRAM tier (always exists)   │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ remotePool            │ BufferPool* │ Secondary REMOTE tier (optional)    │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ allocCount            │ atomic      │ Next available page ID              │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ readCount, writeCount │ atomic      │ I/O statistics                      │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ promotions, demotions │ atomic      │ Migration statistics                │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ migrateMethod         │ enum        │ Which migration method (0-3)        │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ migrateBatchSize      │ u64         │ Batch size for migrations           │
+  ├───────────────────────┼─────────────┼─────────────────────────────────────┤
+  │ movePages2Mode        │ u64         │ Flags for move_pages2 syscall       │
+  └───────────────────────┴─────────────┴─────────────────────────────────────┘
+  3. Core Functions
+
+  fixX(pid) - Exclusive Lock Acquire (line 917)
+
+  Page* BufferManager::fixX(PID pid)
+  ├─ Check page state:
+  │  ├─ Evicted: handleFault() → load page from disk
+  │  └─ Unlocked/Marked: try to acquire exclusive lock
+  │
+  ├─ If REMOTE page and shouldUseTier(dramWriteRatio):
+  │  ├─ collectPromotionBatch(pid, promoteBatch)  // Batch selection
+  │  ├─ dramPool->ensureFreePages()               // Make room in DRAM
+  │  ├─ migratePages(toPromote, dramNode)         // REMOTE→DRAM
+  │  ├─ Update tier for all promoted pages
+  │  └─ promotions += toPromote.size()
+  │
+  └─ Return pointer to page in memory
+
+  fixS(pid) - Shared Lock Acquire (line 978)
+
+  Page* BufferManager::fixS(PID pid)
+  ├─ Check page state:
+  │  ├─ Locked: yield and retry
+  │  ├─ Evicted: acquire exclusive lock, handleFault(), then downgrade to shared
+  │  └─ Default: attempt shared lock
+  │
+  ├─ If REMOTE page and shouldUseTier(dramReadRatio):
+  │  ├─ Same promotion path as fixX (promotion on read)
+  │  └─ Then acquire shared lock and return
+  │
+  └─ Return pointer to page in memory
+
+  unfixX(pid) / unfixS(pid) (lines 1049-1047)
+
+  void BufferManager::unfixX(PID pid)
+  └─ getPageState(pid).unlockX()  // Release exclusive lock
+
+  void BufferManager::unfixS(PID pid)
+  └─ getPageState(pid).unlockS()  // Release shared lock
+
+  allocPage() - Allocate New Page (line 857)
+
+  Page* BufferManager::allocPage()
+  ├─ dramPool->usedCount++
+  ├─ dramPool->ensureFreePages()  // Ensure space available
+  ├─ pid = allocCount++           // Get next page ID
+  ├─ Lock the page exclusively
+  ├─ Set tier to DRAM
+  ├─ dramPool->residentSet->insert(pid)
+  ├─ if (useExmap): exmap ALLOC operation
+  ├─ virtMem[pid].dirty = true
+  └─ Return pointer to allocated page
+
+  readPage(pid) - Load Page from Disk (line 1053)
+
+  void BufferManager::readPage(PID pid)
+  ├─ if (useExmap):
+  │  └─ pread(exmapfd, virtMem+pid, pageSize, workerThreadId)
+  └─ else:
+     └─ pread(blockfd, virtMem+pid, pageSize, pid*pageSize)
+  └─ readCount++
+
+  handleFault(pid) - Page Fault Handler (line 888)
+
+  void BufferManager::handleFault(PID pid)
+  ├─ if (DRAM >= 90% capacity) → load to REMOTE
+  │  ├─ remotePool->ensureFreePages()
+  │  ├─ readPage(pid)
+  │  ├─ migratePages({pid}, remoteNode)  // Move to REMOTE
+  │  └─ Set tier to REMOTE
+  │
+  └─ else (default) → load to DRAM
+     ├─ dramPool->ensureFreePages()
+     ├─ readPage(pid)
+     └─ Set tier to DRAM
+
+  migratePages(pids, targetNode) - NUMA Migration Dispatcher (line 1144)
+
+  void BufferManager::migratePages(pids, targetNode)
+  └─ switch (migrateMethod):
+     ├─ MIGRATE_MBIND_SINGLE (0)      → migratePagesMethod0()
+     ├─ MIGRATE_MOVE_PAGES_SINGLE (1) → migratePagesMethod1()
+     ├─ MIGRATE_MOVE_PAGES_BATCH (2)  → migratePagesMethod2()  [DEFAULT]
+     └─ MIGRATE_MOVE_PAGES2 (3)       → migratePagesMethod3()  [JUST FIXED]
+
+  Migration Methods
+
+  Method 0: mbind() - Per-Page (line 1092)
+  for each pid:
+      mbind(virtMem+pid, pageSize, MPOL_BIND, &nodemask, ..., MPOL_MF_MOVE)
+
+  Method 1: move_pages() - Per-Page (line 1104)
+  for each pid:
+      movePagesToNode({pid}, targetNode)  // Single syscall per page
+
+  Method 2: move_pages() - Batched (line 1112) ← DEFAULT
+  for batch in chunks of migrateBatchSize:
+      movePagesToNode(batch, targetNode)  // Single syscall per batch
+
+  Method 3: move_pages2() - Custom Syscall (line 1122) ← JUST FIXED
+  Create:
+      nodes[] array (all = targetNode)
+      status[] array (for return status)
+  Call:
+      syscall(SYS_move_pages2, 0, count, addrs[], nodes[], status[], movePages2Mode, migrateBatchSize)
+
+  movePagesToNode(pids, targetNode) (line 1073)
+
+  void BufferManager::movePagesToNode(pids, targetNode)
+  ├─ Create addrs[] from pids
+  ├─ Create nodes[] array (all = targetNode)
+  ├─ Create status[] array
+  └─ do_move_pages(count, addrs[], nodes[], status[])
+
+  collectPromotionBatch(currentPid, maxBatch) (line 1162)
+
+  vector<PID> BufferManager::collectPromotionBatch(pid, maxBatch)
+  ├─ Start batch with currentPid (already locked)
+  ├─ effectiveMaxBatch = min(maxBatch, promoteBatchSizeMax)
+  ├─ Scan REMOTE pool with clock algorithm:
+  │  └─ Add up to effectiveMaxBatch pages that are:
+  │     ├─ In REMOTE tier
+  │     ├─ In Unlocked/Marked state (hot)
+  │     └─ Successfully lock for exclusive access
+  └─ Return batch of pages to promote together
+
+  shouldBypassTarget(pool, isWrite) (line 1194)
+
+  bool BufferManager::shouldBypassTarget(pool, isWrite)
+  ├─ For DRAM pool:
+  │  ├─ ratio = isWrite ? numaWriteRatio : numaReadRatio
+  │  └─ return !shouldUseTier(ratio)
+  │     // 1.0 = never bypass, 0.0 = always bypass
+  └─ else: return false (no upward bypass for REMOTE)
+
+  4. Access Pattern & Tier Promotion
+
+  Memory Access → fixX/fixS(pid) → Page Fault?
+  │
+  ├─ YES → handleFault(pid)
+  │        ├─ If DRAM < 90%: Load to DRAM
+  │        └─ If DRAM >= 90%: Load to REMOTE
+  │
+  ├─ NO, in REMOTE → shouldUseTier(dramReadRatio/dramWriteRatio)?
+  │  ├─ YES → collectPromotionBatch() → migratePages() → REMOTE→DRAM
+  │  └─ NO → Access in REMOTE (best effort, avoid promotion)
+  │
+  └─ Access in DRAM
+
+  Release → unfixX/unfixS(pid)
+
+  5. Global Instance
+
+  BufferManager bm;  // Line 422 - global singleton
+  // Created before TPCC workload
+  // Used by all worker threads via workerThreadId context
+
+
+sudo BLOCK=/dev/nvme0n1 VIRTGB=894 PHYSGB=4 REMOTEGB=4 EVICT_BATCH=512 PROMOTE_BATCH_MIN=512 PROMOTE_BATCH_SCAN_MULTIPLIER=8 NUMA_MIGRATE_METHOD=2 MOVE_PAGES2_MAX_BATCH_SIZE=512 THREADS=16 DATASIZE=32 RUNFOR=100 gdb -ex "set pagination off" -ex "run" -ex "thread apply all bt" -ex "quit" --args ./vmcache

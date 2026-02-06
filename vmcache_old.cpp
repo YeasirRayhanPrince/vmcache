@@ -12,7 +12,6 @@
 #include <thread>
 #include <vector>
 #include <span>
-#include <chrono>
 
 #include <errno.h>
 #include <libaio.h>
@@ -21,22 +20,10 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 #include <immintrin.h>
-#include <random>
-#include <numaif.h>
 
 #include "exmap.h"
-
-// NUMA page migration support
-#ifndef MPOL_MF_MOVE
-#define MPOL_MF_MOVE 0x02
-#endif
-
-#ifndef SYS_move_pages2
-#define SYS_move_pages2 462
-#endif
 
 __thread uint16_t workerThreadId = 0;
 __thread int32_t tpcchistorycounter = 0;
@@ -84,48 +71,6 @@ void yield(u64 counter) {
    _mm_pause();
 }
 
-// Thread-local RNG for probabilistic tier decisions
-static bool shouldUseTier(double ratio) {
-   thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-   thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
-   return dist(rng) <= ratio;
-}
-
-// Hyrise-style bypass helpers (direct logic, no double-negative)
-// These match Hyrise's MigrationPolicy interface for clarity
-
-// Bypass DRAM during read access (promote to DRAM or not)
-static bool bypass_dram_during_read(double dramReadRatio) {
-   thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-   thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
-   double rand = dist(rng);
-   return rand > 0 ? rand > dramReadRatio : true;
-}
-
-// Bypass DRAM during write access
-static bool bypass_dram_during_write(double dramWriteRatio) {
-   thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-   thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
-   double rand = dist(rng);
-   return rand > 0 ? rand > dramWriteRatio : true;
-}
-
-// Bypass NUMA/REMOTE during read access (use NUMA or skip to SSD)
-static bool bypass_numa_during_read(double numaReadRatio) {
-   thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-   thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
-   double rand = dist(rng);
-   return rand > 0 ? rand > numaReadRatio : true;
-}
-
-// Bypass NUMA/REMOTE during write access
-static bool bypass_numa_during_write(double numaWriteRatio) {
-   thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-   thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
-   double rand = dist(rng);
-   return rand > 0 ? rand > numaWriteRatio : true;
-}
-
 struct PageState {
    atomic<u64> stateAndVersion;
 
@@ -135,32 +80,12 @@ struct PageState {
    static const u64 Marked = 254;
    static const u64 Evicted = 255;
 
-   // Tier values (bits [55:54])
-   static const u64 TIER_DRAM = 0;
-   static const u64 TIER_REMOTE = 1;
-
    PageState() {}
 
    void init() { stateAndVersion.store(sameVersion(0, Evicted), std::memory_order_release); }
 
    static inline u64 sameVersion(u64 oldStateAndVersion, u64 newState) { return ((oldStateAndVersion<<8)>>8) | newState<<56; }
-   static inline u64 nextVersion(u64 oldStateAndVersion, u64 newState) {
-      // Extract version [53:0], preserving tier [55:54]
-      u64 versionMask = (1ULL << 54) - 1;  // 54 bits of 1s
-      u64 version = (oldStateAndVersion & versionMask) + 1;
-      version &= versionMask;  // Mask after increment (wrap at 2^54)
-
-      // Preserve tier bits [55:54]
-      u64 tier = oldStateAndVersion & (3ULL << 54);
-
-      return version | tier | (newState << 56);
-   }
-
-   // Tier helpers to extract/set tier bits [55:54]
-   static inline u64 getTier(u64 v) { return (v >> 54) & 3; }
-   static inline u64 withTier(u64 v, u64 newTier) {
-      return (v & ~(3ULL << 54)) | (newTier << 54);
-   }
+   static inline u64 nextVersion(u64 oldStateAndVersion, u64 newState) { return (((oldStateAndVersion<<8)>>8)+1) | newState<<56; }
 
    bool tryLockX(u64 oldStateAndVersion) {
       return stateAndVersion.compare_exchange_strong(oldStateAndVersion, sameVersion(oldStateAndVersion, Locked));
@@ -174,14 +99,6 @@ struct PageState {
    void unlockXEvicted() {
       assert(getState() == Locked);
       stateAndVersion.store(nextVersion(stateAndVersion.load(), Evicted), std::memory_order_release);
-   }
-
-   void unlockXWithTier(u64 newTier) {
-      assert(getState() == Locked);
-      u64 old = stateAndVersion.load();
-      u64 newV = nextVersion(old, Unlocked);
-      newV = withTier(newV, newTier);
-      stateAndVersion.store(newV, std::memory_order_release);
    }
 
    void downgradeLock() {
@@ -348,36 +265,13 @@ struct LibaioInterface {
    }
 };
 
-// Forward declaration
-struct BufferManager;
-
-struct BufferPool {
-   u64 maxCount;                    // Capacity (max pages)
-   atomic<u64> usedCount;           // Current resident pages
-   ResidentPageSet* residentSet;    // Clock sweep for this tier
-   int nodeId;                      // NUMA node ID
-   BufferPool* targetPool;          // Next tier (nullptr = evict to SSD)
-
-   // Constructor
-   BufferPool(u64 maxCount_, int nodeId_)
-      : maxCount(maxCount_), usedCount(0), nodeId(nodeId_),
-        targetPool(nullptr) {
-      residentSet = new ResidentPageSet(maxCount);
-   }
-
-   ~BufferPool() {
-      delete residentSet;
-   }
-
-   void evict(BufferManager* bm, bool bypassTarget, u64 minPages = 0);
-   void ensureFreePages(BufferManager* bm, bool bypassTarget, u64 requiredPages = 1);
-};
-
 struct BufferManager {
    static const u64 mb = 1024ull * 1024;
    static const u64 gb = 1024ull * 1024 * 1024;
    u64 virtSize;
+   u64 physSize;
    u64 virtCount;
+   u64 physCount;
    struct exmap_user_interface* exmapInterface[maxWorkerThreads];
    vector<LibaioInterface> libaioInterface;
 
@@ -385,55 +279,19 @@ struct BufferManager {
    int blockfd;
    int exmapfd;
 
-   // BufferPool hierarchy (replaces single residentSet)
-   BufferPool* dramPool;            // Primary tier (always exists)
-   BufferPool* remotePool;          // Secondary tier (nullable if REMOTEGB=0)
-
-   // Migration policy (4 parameters, Hyrise-style)
-   // Environment variables: DRAM_READ_RATIO, DRAM_WRITE_RATIO, NUMA_READ_RATIO, NUMA_WRITE_RATIO
-   double dramReadRatio;            // Promote REMOTE→DRAM on read (0.0-1.0, default 1.0)
-   double dramWriteRatio;           // Promote REMOTE→DRAM on write (0.0-1.0, default 1.0)
-   double numaReadRatio;            // Demote DRAM→REMOTE on eviction during read (0.0-1.0, default 1.0)
-   double numaWriteRatio;           // Demote DRAM→REMOTE on eviction during write (0.0-1.0, default 1.0)
-
-   // Eviction configuration
-   u64 evictBatchSize;              // Batch size for tier demotion (default 64)
-   u64 evictBatchSSD;               // Batch size for SSD eviction (default 64)
-
-   // Promotion configuration
-   // Environment variables: PROMOTE_BATCH_MIN, PROMOTE_BATCH_SCAN_MULTIPLIER
-   u64 promoteBatchMin;             // Minimum pages to promote per batch (default 64, 1 = batching disabled)
-   u64 promoteBatchScanMultiplier;  // Scan depth multiplier (default 8)
-
-   // Migration method selection
-   // Environment variables: NUMA_MIGRATE_METHOD, NUMA_MIGRATE_BATCH_SIZE, MOVE_PAGES2_MODE
-   enum MigrationMethod {
-      MIGRATE_MBIND_SINGLE = 0,        // mbind() one page at a time
-      MIGRATE_MOVE_PAGES_SINGLE = 1,   // move_pages() one page at a time
-      MIGRATE_MOVE_PAGES_BATCH = 2,    // move_pages() n pages at a time (default)
-      MIGRATE_MOVE_PAGES2 = 3          // move_pages2() custom syscall
-   };
-   MigrationMethod migrateMethod;
-   u64 movePages2MaxBatchSize;            // Batch size for methods 2 and 3 (default 64)
-   u64 movePages2Mode;              // Flags/mode for move_pages2 custom syscall (default 0)
-
+   atomic<u64> physUsedCount;
+   ResidentPageSet residentSet;
    atomic<u64> allocCount;
+
    atomic<u64> readCount;
    atomic<u64> writeCount;
-   atomic<u64> promotions;     // REMOTE→DRAM migrations
-   atomic<u64> demotions;      // DRAM→REMOTE migrations
-   atomic<u64> evictionsToSSD; // Any tier→SSD evictions
 
    Page* virtMem;
    PageState* pageState;
+   u64 batch;
 
    PageState& getPageState(PID pid) {
       return pageState[pid];
-   }
-
-   // Helper to get pool for a page based on tier
-   BufferPool* getPoolForTier(u64 tier) {
-      return (tier == PageState::TIER_DRAM) ? dramPool : remotePool;
    }
 
    BufferManager();
@@ -448,22 +306,11 @@ struct BufferManager {
    PID toPID(void* page) { return reinterpret_cast<Page*>(page) - virtMem; }
    Page* toPtr(PID pid) { return virtMem + pid; }
 
-   // Helper functions for multi-tier support
-   void movePagesToNode(const vector<PID>& pids, int targetNode);
-   bool shouldBypassTarget(BufferPool* pool, bool isWrite);
-
-   // Migration methods
-   void migratePages(const vector<PID>& pids, int targetNode);
-   void migratePagesMethod0(const vector<PID>& pids, int targetNode);  // mbind single
-   void migratePagesMethod1(const vector<PID>& pids, int targetNode);  // move_pages single
-   void migratePagesMethod2(const vector<PID>& pids, int targetNode);  // move_pages batch
-   void migratePagesMethod3(const vector<PID>& pids, int targetNode);  // move_pages2
-
-   vector<PID> collectPromotionBatch(PID currentPid);
-
+   void ensureFreePages();
    Page* allocPage();
    void handleFault(PID pid);
    void readPage(PID pid);
+   void evict();
 };
 
 
@@ -739,104 +586,8 @@ u64 envOr(const char* env, u64 value) {
    return value;
 }
 
-double envOrDouble(const char* env, double value) {
-   if (getenv(env))
-      return atof(getenv(env));
-   return value;
-}
-
-bool numa_node_exists(int node) {
-   char path[64];
-   snprintf(path, sizeof(path), "/sys/devices/system/node/node%d", node);
-   return access(path, F_OK) == 0;
-}
-
-// Raw syscall wrapper for move_pages
-static long do_move_pages(unsigned long count, void **pages, const int *nodes, int *status) {
-   return syscall(SYS_move_pages, 0, count, pages, nodes, status, MPOL_MF_MOVE);
-}
-
-// Custom syscall for move_pages2
-#ifndef SYS_move_pages2
-#define SYS_move_pages2 451
-#endif
-
-BufferManager::BufferManager() {
-   // Environment variables:
-   // - Memory sizing: VIRTGB (default 16), PHYSGB (default 4), REMOTEGB (default 0)
-   // - NUMA nodes: DRAM_NODE (default 0), REMOTE_NODE (default 1)
-   // - Migration policy (4 fractions):
-   //   * DRAM_READ_RATIO (default 1.0): promote REMOTE→DRAM on read
-   //   * DRAM_WRITE_RATIO (default 1.0): promote REMOTE→DRAM on write
-   //   * NUMA_READ_RATIO (default 1.0): demote DRAM→REMOTE on read eviction
-   //   * NUMA_WRITE_RATIO (default 1.0): demote DRAM→REMOTE on write eviction
-   // - Inline batched promotion:
-   //   * PROMOTE_BATCH (default 64): pages per promotion batch (0 = single-page)
-   //   * PROMOTE_BATCH_SIZE_MAX (default 256): hard limit on batch size
-   // - NUMA migration methods:
-   //   * NUMA_MIGRATE_METHOD (default 2): 0=mbind, 1=move_pages(1pg), 2=move_pages(batch), 3=move_pages2
-   //   * NUMA_MIGRATE_BATCH_SIZE (default 64): batch size for methods 2-3
-   //   * MOVE_PAGES2_MODE (default 0): flags for move_pages2 custom syscall
-   // - Other: BLOCK (default "/tmp/bm"), EXMAP (default 0), BATCH (default 64)
-
-   // Parse environment variables
-   virtSize = envOr("VIRTGB", 16)*gb;
-   u64 physSize = envOr("PHYSGB", 4)*gb;
-   u64 remoteSize = envOr("REMOTEGB", 0)*gb;
-   virtCount = virtSize / pageSize;
-   u64 physCount = physSize / pageSize;
-   u64 remotePhysCount = remoteSize / pageSize;
-   evictBatchSize = envOr("EVICT_BATCH", 64);
-   evictBatchSSD = envOr("EVICT_BATCH_SSD", 64);
-
-   // NUMA node configuration
-   int dramNode = envOr("DRAM_NODE", 0);
-   int remoteNode = envOr("REMOTE_NODE", 1);
-
-   // Validate NUMA nodes exist
-   if (!numa_node_exists(dramNode)) {
-      cerr << "DRAM_NODE=" << dramNode << " does not exist" << endl;
-      exit(EXIT_FAILURE);
-   }
-   if (remoteSize > 0 && !numa_node_exists(remoteNode)) {
-      cerr << "REMOTE_NODE=" << remoteNode << " does not exist" << endl;
-      exit(EXIT_FAILURE);
-   }
-
-   // Validate virtual address space
-   if (virtCount < physCount + remotePhysCount) {
-      cerr << "VIRTGB must be >= PHYSGB + REMOTEGB" << endl;
-      exit(EXIT_FAILURE);
-   }
-
-   // Create BufferPool hierarchy
-   dramPool = new BufferPool(physCount, dramNode);
-
-   if (remoteSize > 0) {
-      remotePool = new BufferPool(remotePhysCount, remoteNode);
-      dramPool->targetPool = remotePool;  // Chain: DRAM → REMOTE → SSD
-   } else {
-      remotePool = nullptr;
-      // dramPool->targetPool stays nullptr → DRAM → SSD directly
-   }
-
-   // 4-parameter migration policy (Hyrise-style)
-   dramReadRatio = envOrDouble("DRAM_READ_RATIO", 1.0);
-   dramWriteRatio = envOrDouble("DRAM_WRITE_RATIO", 1.0);
-   numaReadRatio = envOrDouble("NUMA_READ_RATIO", 1.0);
-   numaWriteRatio = envOrDouble("NUMA_WRITE_RATIO", 1.0);
-
-   // Promotion configuration
-   promoteBatchMin = envOr("PROMOTE_BATCH", 64);
-   promoteBatchScanMultiplier = envOr("PROMOTE_BATCH_SCAN_MULTIPLIER", 8);
-
-   // Migration method selection
-   int method = envOr("NUMA_MIGRATE_METHOD", 2);  // Default: batched move_pages
-   migrateMethod = static_cast<MigrationMethod>(method);
-   movePages2MaxBatchSize = envOr("MOVE_PAGES2_MAX_BATCH_SIZE", 64);
-   movePages2Mode = envOr("MOVE_PAGES2_MODE", 0);  // Flags for move_pages2 syscall (0 = default)
-
-   // Open block device
+BufferManager::BufferManager() : virtSize(envOr("VIRTGB", 16)*gb), physSize(envOr("PHYSGB", 4)*gb), virtCount(virtSize / pageSize), physCount(physSize / pageSize), residentSet(physCount) {
+   assert(virtSize>=physSize);
    const char* path = getenv("BLOCK") ? getenv("BLOCK") : "/tmp/bm";
    blockfd = open(path, O_RDWR | O_DIRECT, S_IRWXU);
    if (blockfd == -1) {
@@ -880,32 +631,24 @@ BufferManager::BufferManager() {
    for (unsigned i=0; i<maxWorkerThreads; i++)
       libaioInterface.emplace_back(LibaioInterface(blockfd, virtMem));
 
+   physUsedCount = 0;
    allocCount = 1; // pid 0 reserved for meta data
    readCount = 0;
    writeCount = 0;
-   promotions = 0;
-   demotions = 0;
-   evictionsToSSD = 0;
+   batch = envOr("BATCH", 64);
 
-   // Logging
-   cerr << "vmcache blk:" << path << " virtgb:" << virtSize/gb
-        << " physgb:" << physSize/gb;
-   if (remotePool) {
-      cerr << " remotegb:" << remoteSize/gb
-           << " nodes:[" << dramNode << "," << remoteNode << "]"
-           << " policy:[dr=" << dramReadRatio << ",dw=" << dramWriteRatio
-           << ",nr=" << numaReadRatio << ",nw=" << numaWriteRatio << "]"
-           << " promote:[min=" << promoteBatchMin << ",scan_mult=" << promoteBatchScanMultiplier << "]"
-           << " migrate:[method=" << method << ",batch_sz=" << movePages2MaxBatchSize
-           << ",mode=" << movePages2Mode << "]";
-   }
-   cerr << " exmap:" << useExmap << endl;
+   cerr << "vmcache " << "blk:" << path << " virtgb:" << virtSize/gb << " physgb:" << physSize/gb << " exmap:" << useExmap << endl;
+}
+
+void BufferManager::ensureFreePages() {
+   if (physUsedCount >= physCount*0.95)
+      evict();
 }
 
 // allocated new page and fix it
 Page* BufferManager::allocPage() {
-   dramPool->usedCount++;
-   dramPool->ensureFreePages(this, shouldBypassTarget(dramPool, true));
+   physUsedCount++;
+   ensureFreePages();
    u64 pid = allocCount++;
    if (pid >= virtCount) {
       cerr << "VIRTGB is too low" << endl;
@@ -914,19 +657,14 @@ Page* BufferManager::allocPage() {
    u64 stateAndVersion = getPageState(pid).stateAndVersion;
    bool succ = getPageState(pid).tryLockX(stateAndVersion);
    assert(succ);
-   dramPool->residentSet->insert(pid);
-
-   // Set tier to DRAM (bits [55:54] = 0)
-   u64 v = getPageState(pid).stateAndVersion.load();
-   getPageState(pid).stateAndVersion.store(PageState::withTier(v, PageState::TIER_DRAM),
-                                            std::memory_order_relaxed);
+   residentSet.insert(pid);
 
    if (useExmap) {
       exmapInterface[workerThreadId]->iov[0].page = pid;
       exmapInterface[workerThreadId]->iov[0].len = 1;
       while (exmapAction(exmapfd, EXMAP_OP_ALLOC, 1) < 0) {
          cerr << "allocPage errno: " << errno << " pid: " << pid << " workerId: " << workerThreadId << endl;
-         dramPool->ensureFreePages(this, shouldBypassTarget(dramPool, true));
+         ensureFreePages();
       }
    }
    virtMem[pid].dirty = true;
@@ -935,48 +673,10 @@ Page* BufferManager::allocPage() {
 }
 
 void BufferManager::handleFault(PID pid) {
-   // Decide if REMOTE/NUMA tier should be bypassed during page fault load
-   // This follows Hyrise's approach: check bypass_numa policy
-   // Note: handleFault is triggered during read operations (page faults on access)
-   const bool bypass_remote =
-       !remotePool ||                              // No REMOTE tier configured
-       bypass_numa_during_read(numaReadRatio);     // Policy says bypass NUMA/REMOTE
-
-   if (bypass_remote) {
-      // Case 1: Load directly to DRAM (bypass REMOTE tier)
-      dramPool->usedCount++;
-      dramPool->ensureFreePages(this, shouldBypassTarget(dramPool, false));
-
-      // Hyrise-style: mbind BEFORE pread to allocate directly on DRAM node
-      unsigned long nodemask = 1UL << dramPool->nodeId;
-      void* addr = virtMem + pid;
-      int ret = mbind(addr, pageSize, MPOL_BIND, &nodemask, 8*sizeof(nodemask), MPOL_MF_MOVE);
-      assert(ret == 0 && "mbind failed for DRAM node");
-      readPage(pid);  // Kernel allocates on DRAM node during pread
-
-      // Set tier to DRAM
-      u64 v = getPageState(pid).stateAndVersion.load();
-      getPageState(pid).stateAndVersion.store(PageState::withTier(v, PageState::TIER_DRAM),
-                                               std::memory_order_relaxed);
-      dramPool->residentSet->insert(pid);
-   } else {
-      // Case 2: Load to REMOTE tier (respect NUMA tier in hierarchy)
-      remotePool->usedCount++;
-      remotePool->ensureFreePages(this, false);  // REMOTE always evicts to SSD
-
-      // Hyrise-style: mbind BEFORE pread to allocate directly on REMOTE node
-      unsigned long nodemask = 1UL << remotePool->nodeId;
-      void* addr = virtMem + pid;
-      int ret = mbind(addr, pageSize, MPOL_BIND, &nodemask, 8*sizeof(nodemask), MPOL_MF_MOVE);
-      assert(ret == 0 && "mbind failed for REMOTE node");
-      readPage(pid);  // Kernel allocates on REMOTE node during pread
-
-      // Set tier to REMOTE
-      u64 v = getPageState(pid).stateAndVersion.load();
-      getPageState(pid).stateAndVersion.store(PageState::withTier(v, PageState::TIER_REMOTE),
-                                               std::memory_order_relaxed);
-      remotePool->residentSet->insert(pid);
-   }
+   physUsedCount++;
+   ensureFreePages();
+   readPage(pid);
+   residentSet.insert(pid);
 }
 
 Page* BufferManager::fixX(PID pid) {
@@ -992,47 +692,8 @@ Page* BufferManager::fixX(PID pid) {
             break;
          }
          case PageState::Marked: case PageState::Unlocked: {
-            if (ps.tryLockX(stateAndVersion)) {
-               // Inline batched promotion from REMOTE to DRAM on write
-               if (remotePool && PageState::getTier(stateAndVersion) == PageState::TIER_REMOTE) {
-                  if (shouldUseTier(dramWriteRatio)) {
-                     // Collect batch of hot REMOTE pages (including current)
-                     vector<PID> toPromote = collectPromotionBatch(pid);
-
-                     // Ensure DRAM has space (may trigger cascading eviction)
-                     dramPool->ensureFreePages(this, shouldBypassTarget(dramPool, true), toPromote.size());
-
-                     // Batch migrate all pages to DRAM node
-                     migratePages(toPromote, dramPool->nodeId);
-
-                     // Update tracking for all promoted pages
-                     for (PID p : toPromote) {
-                        remotePool->residentSet->remove(p);
-                        dramPool->residentSet->insert(p);
-
-                        // Update tier to DRAM
-                        u64 v = getPageState(p).stateAndVersion.load();
-                        getPageState(p).stateAndVersion.store(
-                           PageState::withTier(v, PageState::TIER_DRAM),
-                           std::memory_order_relaxed
-                        );
-
-                        // Unlock extras (current page stays locked for caller)
-                        if (p != pid) {
-                           getPageState(p).unlockX();
-                        }
-                     }
-
-                     // Update pool counters
-                     remotePool->usedCount -= toPromote.size();
-                     dramPool->usedCount += toPromote.size();
-
-                     // Track promotions
-                     promotions += toPromote.size();
-                  }
-               }
+            if (ps.tryLockX(stateAndVersion))
                return virtMem + pid;
-            }
             break;
          }
       }
@@ -1055,50 +716,6 @@ Page* BufferManager::fixS(PID pid) {
             break;
          }
          default: {
-            // Inline batched promotion from REMOTE to DRAM on read
-            if (remotePool && PageState::getTier(stateAndVersion) == PageState::TIER_REMOTE) {
-               if (shouldUseTier(dramReadRatio)) {
-                  // Try to acquire exclusive lock for promotion
-                  if (ps.tryLockX(stateAndVersion)) {
-                     // Collect batch of hot REMOTE pages
-                     vector<PID> toPromote = collectPromotionBatch(pid);
-
-                     // Ensure DRAM has space
-                     dramPool->ensureFreePages(this, shouldBypassTarget(dramPool, false), toPromote.size());
-
-                     // Batch migrate
-                     migratePages(toPromote, dramPool->nodeId);
-
-                     // Update tracking for all promoted pages
-                     for (PID p : toPromote) {
-                        remotePool->residentSet->remove(p);
-                        dramPool->residentSet->insert(p);
-
-                        u64 v = getPageState(p).stateAndVersion.load();
-                        getPageState(p).stateAndVersion.store(
-                           PageState::withTier(v, PageState::TIER_DRAM),
-                           std::memory_order_relaxed
-                        );
-
-                        if (p != pid) {
-                           getPageState(p).unlockX();
-                        }
-                     }
-
-                     remotePool->usedCount -= toPromote.size();
-                     dramPool->usedCount += toPromote.size();
-
-                     // Track promotions
-                     promotions += toPromote.size();
-
-                     ps.unlockX();
-                     continue;  // Retry to acquire shared lock
-                  }
-                  // If exclusive lock fails, skip promotion (best effort)
-               }
-            }
-
-            // Acquire shared lock
             if (ps.tryLockS(stateAndVersion))
                return virtMem + pid;
          }
@@ -1125,7 +742,7 @@ void BufferManager::readPage(PID pid) {
             return;
          }
          cerr << "readPage errno: " << errno << " pid: " << pid << " workerId: " << workerThreadId << endl;
-         dramPool->ensureFreePages(this, shouldBypassTarget(dramPool, false));
+         ensureFreePages();
       }
    } else {
       int ret = pread(blockfd, virtMem+pid, pageSize, pid*pageSize);
@@ -1134,269 +751,77 @@ void BufferManager::readPage(PID pid) {
    }
 }
 
-// Move pages to a specific NUMA node using move_pages syscall
-void BufferManager::movePagesToNode(const vector<PID>& pids, int targetNode) {
-   if (pids.empty()) return;
-
-   vector<void*> addrs(pids.size());
-   vector<int> nodes(pids.size(), targetNode);
-   vector<int> status(pids.size());
-
-   for (size_t i = 0; i < pids.size(); i++) {
-      addrs[i] = reinterpret_cast<void*>(virtMem + pids[i]);
-   }
-
-   long ret = do_move_pages(pids.size(), addrs.data(), nodes.data(), status.data());
-   if (ret != 0) {
-      cerr << "move_pages failed: errno=" << errno << endl;
-      exit(EXIT_FAILURE);
-   }
-}
-
-// Method 0: mbind (single page)
-void BufferManager::migratePagesMethod0(const vector<PID>& pids, int targetNode) {
-   unsigned long nodemask = 1UL << targetNode;
-   for (PID pid : pids) {
-      void* addr = virtMem + pid;
-      if (mbind(addr, pageSize, MPOL_BIND, &nodemask, 8*sizeof(nodemask), MPOL_MF_MOVE) != 0) {
-         cerr << "mbind failed: errno=" << errno << " pid=" << pid << endl;
-         exit(EXIT_FAILURE);
-      }
-   }
-}
-
-// Method 1: move_pages (single page)
-void BufferManager::migratePagesMethod1(const vector<PID>& pids, int targetNode) {
-   // Current implementation (movePagesToNode one at a time)
-   for (PID pid : pids) {
-      movePagesToNode({pid}, targetNode);
-   }
-}
-
-// Method 2: move_pages (batched)
-void BufferManager::migratePagesMethod2(const vector<PID>& pids, int targetNode) {
-   movePagesToNode(pids, targetNode);  // Single syscall for entire batch
-}
-
-// Method 3: move_pages2 (custom syscall)
-void BufferManager::migratePagesMethod3(const vector<PID>& pids, int targetNode) {
-   if (pids.empty()) return;
-
-   vector<void*> addrs(pids.size());
-   vector<int> nodes(pids.size(), targetNode);  // nodes array
-   vector<int> status(pids.size());             // status array
-
-   for (size_t i = 0; i < pids.size(); i++) {
-      addrs[i] = reinterpret_cast<void*>(virtMem + pids[i]);
-   }
-
-   // Call move_pages2 with correct signature:
-   // syscall(SYS_move_pages2, pid, count, pages[], nodes[], status[], migrate_mode, nr_max_batched_migration)
-   long ret = syscall(SYS_move_pages2, pids.size(), addrs.data(),
-                      nodes.data(), status.data(), movePages2Mode, movePages2MaxBatchSize);
-   // if (ret != 0) {
-   //    cerr << "move_pages2 unavailable, falling back to batched move_pages" << endl;
-   //    migratePagesMethod2(pids, targetNode);
-   // }
-}
-
-// Unified dispatcher for migration
-void BufferManager::migratePages(const vector<PID>& pids, int targetNode) {
-   switch (migrateMethod) {
-      case MIGRATE_MBIND_SINGLE:
-         migratePagesMethod0(pids, targetNode);
-         break;
-      case MIGRATE_MOVE_PAGES_SINGLE:
-         migratePagesMethod1(pids, targetNode);
-         break;
-      case MIGRATE_MOVE_PAGES_BATCH:
-         migratePagesMethod2(pids, targetNode);
-         break;
-      case MIGRATE_MOVE_PAGES2:
-         migratePagesMethod3(pids, targetNode);
-         break;
-   }
-}
-
-// Collect batch of hot REMOTE pages for promotion
-// TODO: u64 maxBatch should be minBatch, and this is the same as the promoteBatch (should change to promoteBatchMin), hence not needed as extra argument
-vector<PID> BufferManager::collectPromotionBatch(PID currentPid) {
-   vector<PID> batch = {currentPid};  // Start with current page (already locked)
-
-   if (promoteBatchMin <= 1) return batch;  // Batching disabled
-
-   // Calculate scan depth using configurable multiplier (e.g., 64 * 8 = 512)
-   u64 maxScans = promoteBatchMin * promoteBatchScanMultiplier;
-
-   // Scan REMOTE pool for other hot pages to add to batch
-   remotePool->residentSet->iterateClockBatch(maxScans, [&](PID pid) {
-      if (batch.size() >= promoteBatchMin) return;  // Target reached
-      if (pid == currentPid) return;                 // Skip current (already in batch)
-
-      PageState& ps = getPageState(pid);
-      u64 v = ps.stateAndVersion.load();
-
-      // Only promote REMOTE tier pages
-      if (PageState::getTier(v) != PageState::TIER_REMOTE) return;
-
-      // Check if hot (Unlocked/Marked = accessed recently)
-      u64 state = PageState::getState(v);
-      if (state != PageState::Unlocked && state != PageState::Marked) return;
-
-      // Try to lock
-      if (ps.tryLockX(v)) {
-         batch.push_back(pid);
-      }
-   });
-
-   return batch;
-}
-
-// Check if we should bypass the target tier based on migration policy
-bool BufferManager::shouldBypassTarget(BufferPool* pool, bool isWrite) {
-   if (!pool->targetPool) return false;  // No target to bypass
-
-   if (pool == dramPool) {
-      // When evicting from DRAM, decide if we bypass REMOTE (demote to SSD directly)
-      return isWrite ? bypass_numa_during_write(numaWriteRatio)
-                     : bypass_numa_during_read(numaReadRatio);
-   }
-
-   return false;  // No upward bypass from REMOTE
-}
-
-// BufferPool::ensureFreePages - check if eviction needed
-void BufferPool::ensureFreePages(BufferManager* bm, bool bypassTarget, u64 requiredPages) {
-   // Calculate how much space we need
-   u64 freePages = maxCount - usedCount;
-
-   // Check if we need to evict: either threshold exceeded OR insufficient space for required pages
-   if (usedCount >= maxCount * 0.95 || freePages < requiredPages) {
-      // Calculate how many pages to evict
-      u64 needed = (freePages < requiredPages) ? (requiredPages - freePages) : 0;
-
-      // If we have a target tier and aren't bypassing, ensure it has space first
-      if (targetPool && !bypassTarget) {
-         targetPool->ensureFreePages(bm, false, needed > 0 ? needed : 1);  // Recurse: cascade down the chain with size
-      }
-
-      // Evict at least 'needed' pages from current tier (0 means use default batch size)
-      evict(bm, bypassTarget, needed);
-   }
-}
-
-// BufferPool::evict - unified eviction/demotion logic
-void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
-   // Determine batch size based on operation type
-   // - Demoting to another tier: use evictBatchSize
-   // - Evicting to SSD: use evictBatchSSD (typically smaller since disk I/O is expensive)
-   bool evictingToSSD = !targetPool || bypassTarget;
-   u64 batchSize = evictingToSSD ? bm->evictBatchSSD : bm->evictBatchSize;
-   u64 targetEvictCount = max(batchSize, minPages);
-
+void BufferManager::evict() {
    vector<PID> toEvict;
-   toEvict.reserve(targetEvictCount);
+   toEvict.reserve(batch);
    vector<PID> toWrite;
-   toWrite.reserve(targetEvictCount);
+   toWrite.reserve(batch);
 
-   // ========== STEP 0: Clock sweep to find candidates ==========
-   while (toEvict.size() + toWrite.size() < targetEvictCount) {
-      residentSet->iterateClockBatch(batchSize, [&](PID pid) {
-         PageState& ps = bm->getPageState(pid);
+   // 0. find candidates, lock dirty ones in shared mode
+   while (toEvict.size()+toWrite.size() < batch) {
+      residentSet.iterateClockBatch(batch, [&](PID pid) {
+         PageState& ps = getPageState(pid);
          u64 v = ps.stateAndVersion;
-
          switch (PageState::getState(v)) {
             case PageState::Marked:
-               // Already marked: ready to evict
-               if (bm->virtMem[pid].dirty) {
+               if (virtMem[pid].dirty) {
                   if (ps.tryLockS(v))
-                     toWrite.push_back(pid);  // Dirty: must write first
+                     toWrite.push_back(pid);
                } else {
-                  toEvict.push_back(pid);     // Clean: evict directly
+                  toEvict.push_back(pid);
                }
                break;
             case PageState::Unlocked:
-               ps.tryMark(v);  // First encounter: give second chance
+               ps.tryMark(v);
                break;
             default:
-               break;  // Skip locked/shared pages
-         }
+               break; // skip
+         };
       });
    }
 
-   // ========== STEP 1: Write dirty pages (ONLY if evicting to SSD) ==========
-   if (!targetPool || bypassTarget) {
-      // Evicting to SSD: must flush dirty pages first
-      bm->libaioInterface[workerThreadId].writePages(toWrite);
-      bm->writeCount += toWrite.size();
-   }
-   // If demoting to target tier, dirty pages stay in RAM — no write needed!
-   
-   // ========== STEP 2: Re-check and lock clean candidates ==========
+   // 1. write dirty pages
+   libaioInterface[workerThreadId].writePages(toWrite);
+   writeCount += toWrite.size();
+
+   // 2. try to lock clean page candidates
    toEvict.erase(std::remove_if(toEvict.begin(), toEvict.end(), [&](PID pid) {
-      PageState& ps = bm->getPageState(pid);
+      PageState& ps = getPageState(pid);
       u64 v = ps.stateAndVersion;
       return (PageState::getState(v) != PageState::Marked) || !ps.tryLockX(v);
    }), toEvict.end());
 
-   // ========== STEP 3: Upgrade dirty pages from shared to exclusive ==========
+   // 3. try to upgrade lock for dirty page candidates
    for (auto& pid : toWrite) {
-      PageState& ps = bm->getPageState(pid);
+      PageState& ps = getPageState(pid);
       u64 v = ps.stateAndVersion;
-      if ((PageState::getState(v) == 1) &&
-         ps.stateAndVersion.compare_exchange_weak(v, PageState::sameVersion(v, PageState::Locked))) {
-         toEvict.push_back(pid);  // Successfully upgraded
-      } else {
-         ps.unlockS();  // Someone else grabbed it, give up
-      }
+      if ((PageState::getState(v) == 1) && ps.stateAndVersion.compare_exchange_weak(v, PageState::sameVersion(v, PageState::Locked)))
+         toEvict.push_back(pid);
+      else
+         ps.unlockS();
    }
 
-   if (toEvict.empty()) return;
-
-   // ========== STEP 4: Demotion to target tier OR eviction to SSD ==========
-   if (targetPool && !bypassTarget) {
-      // **Path A: Demotion to next tier via migration**
-      bm->migratePages(toEvict, targetPool->nodeId);
-
-      for (PID pid : toEvict) {
-         residentSet->remove(pid);
-         targetPool->residentSet->insert(pid);
-         // Transition: Locked(this tier) → Unlocked(target tier), version++
-         bm->getPageState(pid).unlockXWithTier(
-            (targetPool->nodeId == bm->dramPool->nodeId) ? PageState::TIER_DRAM : PageState::TIER_REMOTE
-         );
+   // 4. remove from page table
+   if (useExmap) {
+      for (u64 i=0; i<toEvict.size(); i++) {
+         exmapInterface[workerThreadId]->iov[i].page = toEvict[i];
+         exmapInterface[workerThreadId]->iov[i].len = 1;
       }
-
-      usedCount -= toEvict.size();
-      targetPool->usedCount += toEvict.size();
-
-      // Track demotions (DRAM→REMOTE or REMOTE→lower tier if exists)
-      bm->demotions += toEvict.size();
-
+      if (exmapAction(exmapfd, EXMAP_OP_FREE, toEvict.size()) < 0)
+         die("ioctl: EXMAP_OP_FREE");
    } else {
-      // **Path B: Eviction to SSD (no lower tier available)**
-      if (bm->useExmap) {
-         for (u64 i=0; i<toEvict.size(); i++) {
-            bm->exmapInterface[workerThreadId]->iov[i].page = toEvict[i];
-            bm->exmapInterface[workerThreadId]->iov[i].len = 1;
-         }
-         if (exmapAction(bm->exmapfd, EXMAP_OP_FREE, toEvict.size()) < 0)
-            die("ioctl: EXMAP_OP_FREE");
-      } else {
-         for (PID pid : toEvict)
-            madvise(bm->virtMem + pid, pageSize, MADV_DONTNEED);
-      }
-
-      for (PID pid : toEvict) {
-         residentSet->remove(pid);
-         bm->getPageState(pid).unlockXEvicted();  // Locked → Evicted, version++
-      }
-
-      usedCount -= toEvict.size();
-
-      // Track evictions to SSD
-      bm->evictionsToSSD += toEvict.size();
+      for (u64& pid : toEvict)
+         madvise(virtMem + pid, pageSize, MADV_DONTNEED);
    }
+
+   // 5. remove from hash table and unlock
+   for (u64& pid : toEvict) {
+      bool succ = residentSet.remove(pid);
+      assert(succ);
+      getPageState(pid).unlockXEvicted();
+   }
+
+   physUsedCount -= toEvict.size();
 }
 
 //---------------------------------------------------------------------------
@@ -2301,56 +1726,16 @@ int main(int argc, char** argv) {
    auto systemName = bm.useExmap ? "exmap" : "vmcache";
 
    auto statFn = [&]() {
-      cout << "ts,tx,rmb,wmb,system,threads,datasize,workload,batch,"
-           << "dram_used,dram_max,remote_used,remote_max,"
-           << "promotions,demotions,evictions" << endl;
-
-      // Aggregation variables
-      u64 total_tx = 0;
-      double total_rmb = 0.0;
-      double total_wmb = 0.0;
-      u64 total_proms = 0;
-      u64 total_demos = 0;
-      u64 total_evicts = 0;
-
+      cout << "ts,tx,rmb,wmb,system,threads,datasize,workload,batch" << endl;
       u64 cnt = 0;
       for (uint64_t i=0; i<runForSec; i++) {
          sleep(1);
          float rmb = (bm.readCount.exchange(0)*pageSize)/(1024.0*1024);
          float wmb = (bm.writeCount.exchange(0)*pageSize)/(1024.0*1024);
          u64 prog = txProgress.exchange(0);
-         u64 proms = bm.promotions.exchange(0);
-         u64 demos = bm.demotions.exchange(0);
-         u64 evicts = bm.evictionsToSSD.exchange(0);
-
-         // Accumulate totals
-         total_tx += prog;
-         total_rmb += rmb;
-         total_wmb += wmb;
-         total_proms += proms;
-         total_demos += demos;
-         total_evicts += evicts;
-
-         cout << cnt++ << "," << prog << "," << rmb << "," << wmb << ","
-              << systemName << "," << nthreads << "," << n << ","
-              << (isRndread?"rndread":"tpcc") << "," << bm.evictBatchSize << ","
-              << bm.dramPool->usedCount.load() << "," << bm.dramPool->maxCount << ","
-              << (bm.remotePool ? bm.remotePool->usedCount.load() : 0) << ","
-              << (bm.remotePool ? bm.remotePool->maxCount : 0) << ","
-              << proms << "," << demos << "," << evicts << endl;
+         cout << cnt++ << "," << prog << "," << rmb << "," << wmb << "," << systemName << "," << nthreads << "," << n << "," << (isRndread?"rndread":"tpcc") << "," << bm.batch << endl;
       }
       keepRunning = false;
-
-      // Print aggregated averages
-      cout << "\n=== Averages over " << runForSec << " seconds ===" << endl;
-      cout << "Avg TX/s: " << (total_tx / runForSec) << endl;
-      cout << "Avg Read MB/s: " << (total_rmb / runForSec) << endl;
-      cout << "Avg Write MB/s: " << (total_wmb / runForSec) << endl;
-      cout << "Avg Promotions/s: " << (total_proms / runForSec) << endl;
-      cout << "Avg Demotions/s: " << (total_demos / runForSec) << endl;
-      cout << "Avg Evictions/s: " << (total_evicts / runForSec) << endl;
-      cout << "Total TX: " << total_tx << endl;
-
    };
 
    if (isRndread) {
