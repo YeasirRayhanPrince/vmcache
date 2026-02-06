@@ -87,6 +87,10 @@ Control how pages are migrated between NUMA nodes:
 
 ### System Configuration
 You will probably also need to set `vm.overcommit_memory = 1` in `/etc/sysctl.conf`. Otherwise larger values of VIRTGB will not work.
+```bash
+  echo 'vm.overcommit_memory = 1' | sudo tee -a /etc/sysctl.conf                                            
+  sudo sysctl -p
+```
 
 ### Optional: EXMAP Support
 If you want to use EXMAP (EXMAP=1), you need the [exmap kernel module](https://github.com/tuhhosg/exmap).

@@ -32,8 +32,12 @@ export REMOTE_NODE=${REMOTE_NODE:-1}
 # Benchmark and eviction configuration
 export RUNFOR=${RUNFOR:-100}
 export RNDREAD=${RNDREAD:-0}
-export THREADS=${THREADS:-48}
-export DATASIZE=${DATASIZE:-500}
+export THREADS=${THREADS:-16}
+export DATASIZE=${DATASIZE:-50}
+
+# YCSB configuration (set YCSB to A-F to enable, unset for TPC-C/rndread)
+export YCSB=A
+export ZIPF_THETA=${ZIPF_THETA:-0.99}
 
 # Execute
-sudo -E ./vmcache
+sudo -E numactl --cpubind=0 ./vmcache

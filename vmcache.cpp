@@ -41,6 +41,7 @@
 __thread uint16_t workerThreadId = 0;
 __thread int32_t tpcchistorycounter = 0;
 #include "tpcc/TPCCWorkload.hpp"
+#include "ycsb/YCSBWorkload.hpp"
 
 using namespace std;
 
@@ -2294,6 +2295,10 @@ int main(int argc, char** argv) {
    u64 n = envOr("DATASIZE", 10);
    u64 runForSec = envOr("RUNFOR", 30);
    bool isRndread = envOr("RNDREAD", 0);
+   const char* ycsbEnv = getenv("YCSB");
+   bool isYcsb = ycsbEnv != nullptr;
+   char ycsbType = isYcsb ? (ycsbEnv[0] ? ycsbEnv[0] : 'A') : 'A';
+   double zipfTheta = envOrDouble("ZIPF_THETA", 0.99);
 
    u64 statDiff = 1e8;
    atomic<u64> txProgress(0);
@@ -2333,7 +2338,7 @@ int main(int argc, char** argv) {
 
          cout << cnt++ << "," << prog << "," << rmb << "," << wmb << ","
               << systemName << "," << nthreads << "," << n << ","
-              << (isRndread?"rndread":"tpcc") << "," << bm.evictBatchSize << ","
+              << (isYcsb ? (std::string("ycsb_") + ycsbType) : (isRndread?"rndread":"tpcc")) << "," << bm.evictBatchSize << ","
               << bm.dramPool->usedCount.load() << "," << bm.dramPool->maxCount << ","
               << (bm.remotePool ? bm.remotePool->usedCount.load() : 0) << ","
               << (bm.remotePool ? bm.remotePool->maxCount : 0) << ","
@@ -2394,6 +2399,60 @@ int main(int argc, char** argv) {
             cnt++;
             u64 stop = rdtsc();
             if ((stop-start) > statDiff) {
+               txProgress += cnt;
+               start = stop;
+               cnt = 0;
+            }
+         }
+         txProgress += cnt;
+      });
+
+      statThread.join();
+      return 0;
+   }
+
+   if (isYcsb) {
+      YCSBWorkloadType wlType;
+      switch (ycsbType) {
+         case 'A': wlType = YCSBWorkloadType::A; break;
+         case 'B': wlType = YCSBWorkloadType::B; break;
+         case 'C': wlType = YCSBWorkloadType::C; break;
+         case 'D': wlType = YCSBWorkloadType::D; break;
+         case 'E': wlType = YCSBWorkloadType::E; break;
+         case 'F': wlType = YCSBWorkloadType::F; break;
+         default: wlType = YCSBWorkloadType::A; break;
+      }
+
+      u64 recordCount = n * 1000000ull; // DATASIZE in millions
+      vmcacheAdapter<ycsb_t> ycsbTable;
+      YCSBWorkload<vmcacheAdapter> ycsb(ycsbTable, recordCount, zipfTheta);
+
+      // Load phase
+      ycsb.load(nthreads, recordCount, parallel_for);
+      cerr << "ycsb load done, space: " << (bm.allocCount.load()*pageSize)/(float)bm.gb << " GB " << endl;
+
+      // Pre-generate operations per thread
+      u64 opsPerThread = 10000000ull;
+      vector<vector<YCSBOperation>> threadOps(nthreads);
+      for (unsigned t = 0; t < nthreads; t++)
+         threadOps[t] = ycsb.generateOps(opsPerThread, wlType, 42 + t);
+
+      bm.readCount = 0;
+      bm.writeCount = 0;
+      thread statThread(statFn);
+
+      parallel_for(0, nthreads, nthreads, [&](uint64_t worker, uint64_t begin, uint64_t end) {
+         workerThreadId = worker;
+         auto& ops = threadOps[worker];
+         u64 cnt = 0;
+         u64 opIdx = 0;
+         u64 start = rdtsc();
+         while (keepRunning.load()) {
+            ycsb.executeOp(ops[opIdx % ops.size()]);
+            opIdx++;
+            cnt++;
+            u64 stop = rdtsc();
+            if ((stop - start) > statDiff) {
                txProgress += cnt;
                start = stop;
                cnt = 0;
