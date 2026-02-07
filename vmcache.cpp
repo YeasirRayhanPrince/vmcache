@@ -140,6 +140,9 @@ struct PageState {
    static const u64 TIER_DRAM = 0;
    static const u64 TIER_REMOTE = 1;
 
+   // Masks for bit layout: [63:56]=state, [55:54]=tier, [53:0]=version
+   static const u64 VERSION_MASK = (1ULL << 54) - 1;
+
    PageState() {}
 
    void init() { stateAndVersion.store(sameVersion(0, Evicted), std::memory_order_release); }
@@ -309,7 +312,7 @@ struct ResidentPageSet {
 
 // libaio interface used to write batches of pages
 struct LibaioInterface {
-   static const u64 maxIOs = 256;
+   static constexpr u64 maxIOs = 256;
 
    int blockfd;
    Page* virtMem;
@@ -335,17 +338,19 @@ struct LibaioInterface {
    }
 
    void writePages(const vector<PID>& pages) {
-      assert(pages.size() < maxIOs);
-      for (u64 i=0; i<pages.size(); i++) {
-         PID pid = pages[i];
-         virtMem[pid].dirty = false;
-         cbPtr[i] = &cb[i];
-         io_prep_pwrite(cb+i, blockfd, &virtMem[pid], pageSize, pageSize*pid);
+      for (u64 base = 0; base < pages.size(); base += maxIOs) {
+         u64 n = std::min<u64>(maxIOs, pages.size() - base);
+         for (u64 i = 0; i < n; i++) {
+            PID pid = pages[base + i];
+            virtMem[pid].dirty = false;
+            cbPtr[i] = &cb[i];
+            io_prep_pwrite(cb + i, blockfd, &virtMem[pid], pageSize, pageSize * pid);
+         }
+         int cnt = io_submit(ctx, n, cbPtr);
+         assert(cnt == static_cast<int>(n));
+         cnt = io_getevents(ctx, n, n, events, nullptr);
+         assert(cnt == static_cast<int>(n));
       }
-      int cnt = io_submit(ctx, pages.size(), cbPtr);
-      assert(cnt == pages.size());
-      cnt = io_getevents(ctx, pages.size(), pages.size(), events, nullptr);
-      assert(cnt == pages.size());
    }
 };
 
@@ -552,7 +557,7 @@ struct GuardO {
          u64 stateAndVersion = ps.stateAndVersion.load();
          if (version == stateAndVersion) // fast path, nothing changed
             return;
-         if ((stateAndVersion<<8) == (version<<8)) { // same version
+         if ((stateAndVersion & PageState::VERSION_MASK) == (version & PageState::VERSION_MASK)) { // same version (ignore tier+state)
             u64 state = PageState::getState(stateAndVersion);
             if (state <= PageState::MaxShared)
                return; // ignore shared locks
@@ -602,7 +607,7 @@ struct GuardX {
       for (u64 repeatCounter=0; ; repeatCounter++) {
          PageState& ps = bm.getPageState(other.pid);
          u64 stateAndVersion = ps.stateAndVersion;
-         if ((stateAndVersion<<8) != (other.version<<8))
+         if ((stateAndVersion & PageState::VERSION_MASK) != (other.version & PageState::VERSION_MASK))
             throw OLCRestartException();
          u64 state = PageState::getState(stateAndVersion);
          if ((state == PageState::Unlocked) || (state == PageState::Marked)) {
@@ -689,11 +694,17 @@ struct GuardS {
       }
    }
 
-   GuardS(GuardS&& other) {
-      if (pid != moved)
-         bm.unfixS(pid);
-      pid = other.pid;
-      ptr = other.ptr;
+   // Old move ctor (buggy: pid was uninitialized; could unfix random page)
+   // GuardS(GuardS&& other) {
+   //    if (pid != moved)
+   //       bm.unfixS(pid);
+   //    pid = other.pid;
+   //    ptr = other.ptr;
+   //    other.pid = moved;
+   //    other.ptr = nullptr;
+   // }
+
+   GuardS(GuardS&& other) : pid(other.pid), ptr(other.ptr) {
       other.pid = moved;
       other.ptr = nullptr;
    }
@@ -1240,9 +1251,9 @@ vector<PID> BufferManager::collectPromotionBatch(PID currentPid) {
       // Only promote REMOTE tier pages
       if (PageState::getTier(v) != PageState::TIER_REMOTE) return;
 
-      // Check if hot (Unlocked/Marked = accessed recently)
+      // Check if hot (Unlocked = accessed since last clock sweep)
       u64 state = PageState::getState(v);
-      if (state != PageState::Unlocked && state != PageState::Marked) return;
+      if (state != PageState::Unlocked) return;
 
       // Try to lock
       if (ps.tryLockX(v)) {
@@ -2299,6 +2310,7 @@ int main(int argc, char** argv) {
    bool isYcsb = ycsbEnv != nullptr;
    char ycsbType = isYcsb ? (ycsbEnv[0] ? ycsbEnv[0] : 'A') : 'A';
    double zipfTheta = envOrDouble("ZIPF_THETA", 0.99);
+   u64 ycsbTupleSize = envOr("YCSB_TUPLE_SIZE", 100);
 
    u64 statDiff = 1e8;
    atomic<u64> txProgress(0);
@@ -2423,45 +2435,52 @@ int main(int argc, char** argv) {
          default: wlType = YCSBWorkloadType::A; break;
       }
 
-      u64 recordCount = n * 1000000ull; // DATASIZE in millions
-      vmcacheAdapter<ycsb_t> ycsbTable;
-      YCSBWorkload<vmcacheAdapter> ycsb(ycsbTable, recordCount, zipfTheta);
+      auto runYcsb = [&]<typename Record>() {
+         u64 recordCount = n * 1000000ull; // DATASIZE in millions
+         vmcacheAdapter<Record> ycsbTable;
+         YCSBWorkload<vmcacheAdapter, Record> ycsb(ycsbTable, recordCount, zipfTheta);
 
-      // Load phase
-      ycsb.load(nthreads, recordCount, parallel_for);
-      cerr << "ycsb load done, space: " << (bm.allocCount.load()*pageSize)/(float)bm.gb << " GB " << endl;
+         // Load phase
+         ycsb.load(nthreads, recordCount, parallel_for);
+         cerr << "ycsb load done (tuple=" << sizeof(Record) << "B), space: " << (bm.allocCount.load()*pageSize)/(float)bm.gb << " GB " << endl;
 
-      // Pre-generate operations per thread
-      u64 opsPerThread = 10000000ull;
-      vector<vector<YCSBOperation>> threadOps(nthreads);
-      for (unsigned t = 0; t < nthreads; t++)
-         threadOps[t] = ycsb.generateOps(opsPerThread, wlType, 42 + t);
+         // Pre-generate operations per thread
+         u64 opsPerThread = 10000000ull;
+         vector<vector<YCSBOperation>> threadOps(nthreads);
+         for (unsigned t = 0; t < nthreads; t++)
+            threadOps[t] = ycsb.generateOps(opsPerThread, wlType, 42 + t);
 
-      bm.readCount = 0;
-      bm.writeCount = 0;
-      thread statThread(statFn);
+         bm.readCount = 0;
+         bm.writeCount = 0;
+         thread statThread(statFn);
 
-      parallel_for(0, nthreads, nthreads, [&](uint64_t worker, uint64_t begin, uint64_t end) {
-         workerThreadId = worker;
-         auto& ops = threadOps[worker];
-         u64 cnt = 0;
-         u64 opIdx = 0;
-         u64 start = rdtsc();
-         while (keepRunning.load()) {
-            ycsb.executeOp(ops[opIdx % ops.size()]);
-            opIdx++;
-            cnt++;
-            u64 stop = rdtsc();
-            if ((stop - start) > statDiff) {
-               txProgress += cnt;
-               start = stop;
-               cnt = 0;
+         parallel_for(0, nthreads, nthreads, [&](uint64_t worker, uint64_t begin, uint64_t end) {
+            workerThreadId = worker;
+            auto& ops = threadOps[worker];
+            u64 cnt = 0;
+            u64 opIdx = 0;
+            u64 start = rdtsc();
+            while (keepRunning.load()) {
+               ycsb.executeOp(ops[opIdx % ops.size()]);
+               opIdx++;
+               cnt++;
+               u64 stop = rdtsc();
+               if ((stop - start) > statDiff) {
+                  txProgress += cnt;
+                  start = stop;
+                  cnt = 0;
+               }
             }
-         }
-         txProgress += cnt;
-      });
+            txProgress += cnt;
+         });
 
-      statThread.join();
+         statThread.join();
+      };
+
+      if (ycsbTupleSize <= 56) runYcsb.template operator()<ycsb_t<56>>();
+      else if (ycsbTupleSize <= 100) runYcsb.template operator()<ycsb_t<100>>();
+      else if (ycsbTupleSize <= 1024) runYcsb.template operator()<ycsb_t<1024>>();
+      else runYcsb.template operator()<ycsb_t<4096>>();
       return 0;
    }
 

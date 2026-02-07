@@ -243,3 +243,14 @@ BufferManager Initialization & Related Functions
 
 
 sudo BLOCK=/dev/nvme0n1 VIRTGB=894 PHYSGB=4 REMOTEGB=4 EVICT_BATCH=512 PROMOTE_BATCH_MIN=512 PROMOTE_BATCH_SCAN_MULTIPLIER=8 NUMA_MIGRATE_METHOD=2 MOVE_PAGES2_MAX_BATCH_SIZE=512 THREADS=16 DATASIZE=32 RUNFOR=100 gdb -ex "set pagination off" -ex "run" -ex "thread apply all bt" -ex "quit" --args ./vmcache
+
+source vmcache_env.sh
+sudo -E gdb --args numactl --cpubind=0 ./vmcache
+break __assert_fail
+
+run
+# when it crashes:
+bt
+bt full
+info threads
+thread apply all bt

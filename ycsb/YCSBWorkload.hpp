@@ -5,15 +5,15 @@
 #include <atomic>
 #include <random>
 
-static constexpr unsigned YCSB_FIELD_SIZE = 100; // 10 fields x 10 bytes
-
+template <unsigned FieldSize = 100>
 struct ycsb_t {
-   static constexpr int id = 20;
+   static constexpr int id = 20 + FieldSize; // unique per instantiation
    struct Key {
       u64 ycsb_key;
    };
-   u8 field[YCSB_FIELD_SIZE];
+   u8 field[FieldSize];
 
+   static constexpr unsigned fieldSize() { return FieldSize; }
    static constexpr unsigned maxFoldLength() { return sizeof(u64); }
 
    template <class T>
@@ -40,14 +40,14 @@ struct YCSBOperation {
 
 enum class YCSBWorkloadType : char { A='A', B='B', C='C', D='D', E='E', F='F' };
 
-template <template<typename> class AdapterType>
+template <template<typename> class AdapterType, typename Record = ycsb_t<100>>
 struct YCSBWorkload {
-   AdapterType<ycsb_t>& table;
+   AdapterType<Record>& table;
    u64 recordCount;
    std::atomic<u64> nextInsertKey;
    double theta;
 
-   YCSBWorkload(AdapterType<ycsb_t>& table, u64 recordCount, double theta = 0.99)
+   YCSBWorkload(AdapterType<Record>& table, u64 recordCount, double theta = 0.99)
       : table(table), recordCount(recordCount), nextInsertKey(recordCount), theta(theta) {}
 
    void load(unsigned nthreads, u64 count,
@@ -56,8 +56,8 @@ struct YCSBWorkload {
       parallel_for_fn(0, count, nthreads, [&](uint64_t worker, uint64_t begin, uint64_t end) {
          workerThreadId = worker;
          for (u64 i = begin; i < end; i++) {
-            ycsb_t record;
-            RandomGenerator::getRandString(record.field, YCSB_FIELD_SIZE);
+            Record record;
+            RandomGenerator::getRandString(record.field, Record::fieldSize());
             table.insert({i}, record);
          }
       });
@@ -112,46 +112,48 @@ struct YCSBWorkload {
    }
 
    void executeOp(const YCSBOperation& op) {
+      constexpr unsigned fieldSz = Record::fieldSize();
       switch (op.op) {
          case YCSBOp::Read: {
-            ycsb_t result;
-            table.lookup1({op.key}, [&](const ycsb_t& r) {
+            Record result;
+            table.lookup1({op.key}, [&](const Record& r) {
                result = r;
             });
             break;
          }
          case YCSBOp::Update: {
-            table.update1({op.key}, [&](ycsb_t& r) {
-               // Update a random 10-byte segment
-               unsigned offset = RandomGenerator::getRand<unsigned>(0, YCSB_FIELD_SIZE - 10);
-               RandomGenerator::getRandString(r.field + offset, 10);
+            unsigned updateLen = fieldSz < 10 ? fieldSz : 10;
+            table.update1({op.key}, [&](Record& r) {
+               unsigned offset = RandomGenerator::getRand<unsigned>(0, fieldSz - updateLen);
+               RandomGenerator::getRandString(r.field + offset, updateLen);
             });
             break;
          }
          case YCSBOp::Insert: {
             u64 newKey = nextInsertKey.fetch_add(1);
-            ycsb_t record;
-            RandomGenerator::getRandString(record.field, YCSB_FIELD_SIZE);
+            Record record;
+            RandomGenerator::getRandString(record.field, fieldSz);
             table.insert({newKey}, record);
             break;
          }
          case YCSBOp::Scan: {
             u64 scanLength = RandomGenerator::getRand<u64>(1, 100);
             u64 count = 0;
-            table.scan({op.key}, [&](const ycsb_t::Key&, const ycsb_t&) {
+            table.scan({op.key}, [&](const typename Record::Key&, const Record&) {
                count++;
                return count < scanLength;
             }, [](){});
             break;
          }
          case YCSBOp::ReadModifyWrite: {
-            ycsb_t result;
-            table.lookup1({op.key}, [&](const ycsb_t& r) {
+            unsigned updateLen = fieldSz < 10 ? fieldSz : 10;
+            Record result;
+            table.lookup1({op.key}, [&](const Record& r) {
                result = r;
             });
-            table.update1({op.key}, [&](ycsb_t& r) {
-               unsigned offset = RandomGenerator::getRand<unsigned>(0, YCSB_FIELD_SIZE - 10);
-               RandomGenerator::getRandString(r.field + offset, 10);
+            table.update1({op.key}, [&](Record& r) {
+               unsigned offset = RandomGenerator::getRand<unsigned>(0, fieldSz - updateLen);
+               RandomGenerator::getRandString(r.field + offset, updateLen);
             });
             break;
          }
