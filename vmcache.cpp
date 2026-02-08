@@ -2351,6 +2351,7 @@ int main(int argc, char** argv) {
    char ycsbType = isYcsb ? (ycsbEnv[0] ? ycsbEnv[0] : 'A') : 'A';
    double zipfTheta = envOrDouble("ZIPF_THETA", 0.99);
    u64 ycsbTupleSize = envOr("YCSB_TUPLE_SIZE", 100);
+   double ycsbScanSelectivity = envOrDouble("YCSB_SCAN_SELECTIVITY", 1e-7);  // Default ~50 records for 1B dataset
 
    u64 statDiff = 1e8;
    atomic<u64> txProgress(0);
@@ -2490,18 +2491,12 @@ int main(int argc, char** argv) {
       auto runYcsb = [&]<typename Record>() {
          u64 recordCount = n * 1000000ull; // DATASIZE in millions
          vmcacheAdapter<Record> ycsbTable;
-         YCSBWorkload<vmcacheAdapter, Record> ycsb(ycsbTable, recordCount, zipfTheta);
+         YCSBWorkload<vmcacheAdapter, Record> ycsb(ycsbTable, recordCount, zipfTheta, ycsbScanSelectivity);
 
          // Load phase
          ycsb.load(nthreads, recordCount, parallel_for);
          cerr << "ycsb load done (tuple=" << sizeof(Record) << "B), space: " << (bm.allocCount.load()*pageSize)/(float)bm.gb << " GB " << endl;
          bm.activateWorkloadRatios();
-
-         // Pre-generate operations per thread
-         u64 opsPerThread = 10000000ull;
-         vector<vector<YCSBOperation>> threadOps(nthreads);
-         for (unsigned t = 0; t < nthreads; t++)
-            threadOps[t] = ycsb.generateOps(opsPerThread, wlType, 42 + t);
 
          bm.readCount = 0;
          bm.writeCount = 0;
@@ -2509,13 +2504,30 @@ int main(int argc, char** argv) {
 
          parallel_for(0, nthreads, nthreads, [&](uint64_t worker, uint64_t begin, uint64_t end) {
             workerThreadId = worker;
-            auto& ops = threadOps[worker];
             u64 cnt = 0;
-            u64 opIdx = 0;
             u64 start = rdtsc();
+
+            // Generate operations on-the-fly like TPC-C (no pre-generation, no shuffle)
+            std::mt19937_64 gen(42 + worker);
+            ZipfianGenerator zipf(recordCount, zipfTheta);
+            std::uniform_real_distribution<double> coinFlip(0.0, 1.0);
+
             while (keepRunning.load()) {
-               ycsb.executeOp(ops[opIdx % ops.size()]);
-               opIdx++;
+               // Generate operation in place
+               YCSBOperation op;
+               op.key = zipf(gen) % recordCount;  // Direct use of zipfian rank as key
+               double coin = coinFlip(gen);
+
+               switch (wlType) {
+                  case YCSBWorkloadType::A: op.op = (coin < 0.5) ? YCSBOp::Read : YCSBOp::Update; break;
+                  case YCSBWorkloadType::B: op.op = (coin < 0.95) ? YCSBOp::Read : YCSBOp::Update; break;
+                  case YCSBWorkloadType::C: op.op = YCSBOp::Read; break;
+                  case YCSBWorkloadType::D: op.op = (coin < 0.95) ? YCSBOp::Read : YCSBOp::Insert; break;
+                  case YCSBWorkloadType::E: op.op = (coin < 0.95) ? YCSBOp::Scan : YCSBOp::Insert; break;
+                  case YCSBWorkloadType::F: op.op = (coin < 0.5) ? YCSBOp::Read : YCSBOp::ReadModifyWrite; break;
+               }
+
+               ycsb.executeOp(op);
                cnt++;
                u64 stop = rdtsc();
                if ((stop - start) > statDiff) {
@@ -2532,6 +2544,9 @@ int main(int argc, char** argv) {
 
       if (ycsbTupleSize <= 56) runYcsb.template operator()<ycsb_t<56>>();
       else if (ycsbTupleSize <= 100) runYcsb.template operator()<ycsb_t<100>>();
+      else if (ycsbTupleSize <= 128) runYcsb.template operator()<ycsb_t<128>>();
+      else if (ycsbTupleSize <= 256) runYcsb.template operator()<ycsb_t<256>>();
+      else if (ycsbTupleSize <= 512) runYcsb.template operator()<ycsb_t<512>>();
       else if (ycsbTupleSize <= 1024) runYcsb.template operator()<ycsb_t<1024>>();
       else runYcsb.template operator()<ycsb_t<4096>>();
       return 0;

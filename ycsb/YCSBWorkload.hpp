@@ -46,9 +46,10 @@ struct YCSBWorkload {
    u64 recordCount;
    std::atomic<u64> nextInsertKey;
    double theta;
+   double scanSelectivity;  // Fraction of dataset to scan (e.g., 1e-7 for ~50 records on 1B dataset)
 
-   YCSBWorkload(AdapterType<Record>& table, u64 recordCount, double theta = 0.99)
-      : table(table), recordCount(recordCount), nextInsertKey(recordCount), theta(theta) {}
+   YCSBWorkload(AdapterType<Record>& table, u64 recordCount, double theta = 0.99, double scanSelectivity = 1e-7)
+      : table(table), recordCount(recordCount), nextInsertKey(recordCount), theta(theta), scanSelectivity(scanSelectivity) {}
 
    void load(unsigned nthreads, u64 count,
              void (*parallel_for_fn)(uint64_t, uint64_t, uint64_t,
@@ -137,7 +138,8 @@ struct YCSBWorkload {
             break;
          }
          case YCSBOp::Scan: {
-            u64 scanLength = RandomGenerator::getRand<u64>(1, 100);
+            u64 maxScanLength = std::max(1UL, (u64)(recordCount * scanSelectivity));
+            u64 scanLength = RandomGenerator::getRand<u64>(1, maxScanLength);
             u64 count = 0;
             table.scan({op.key}, [&](const typename Record::Key&, const Record&) {
                count++;
