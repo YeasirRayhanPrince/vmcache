@@ -206,6 +206,9 @@ struct PageState {
       while (true) {
          u64 oldStateAndVersion = stateAndVersion.load();
          u64 state = getState(oldStateAndVersion);
+         if (!(state>0 && state<=MaxShared)) {
+            std::cerr << "unlockS assertion failed: state=" << state << " stateAndVersion=" << oldStateAndVersion << std::endl;
+         }
          assert(state>0 && state<=MaxShared);
          if (stateAndVersion.compare_exchange_strong(oldStateAndVersion, sameVersion(oldStateAndVersion, state-1)))
             return;
@@ -402,6 +405,21 @@ struct BufferManager {
    double numaReadRatio;            // Demote DRAM→REMOTE on eviction during read (0.0-1.0, default 1.0)
    double numaWriteRatio;           // Demote DRAM→REMOTE on eviction during write (0.0-1.0, default 1.0)
 
+   // User-configured ratios (restored after load phase)
+   double userDramReadRatio;
+   double userDramWriteRatio;
+   double userNumaReadRatio;
+   double userNumaWriteRatio;
+
+   void activateWorkloadRatios() {
+      dramReadRatio = userDramReadRatio;
+      dramWriteRatio = userDramWriteRatio;
+      numaReadRatio = userNumaReadRatio;
+      numaWriteRatio = userNumaWriteRatio;
+      cerr << "Switching to workload ratios: dr=" << dramReadRatio << " dw=" << dramWriteRatio
+           << " nr=" << numaReadRatio << " nw=" << numaWriteRatio << endl;
+   }
+
    // Eviction configuration
    u64 evictBatchSize;              // Batch size for tier demotion (default 64)
    u64 evictBatchSSD;               // Batch size for SSD eviction (default 64)
@@ -429,6 +447,8 @@ struct BufferManager {
    atomic<u64> promotions;     // REMOTE→DRAM migrations
    atomic<u64> demotions;      // DRAM→REMOTE migrations
    atomic<u64> evictionsToSSD; // Any tier→SSD evictions
+   atomic<u64> promotionBatches;  // Number of promotion batch operations
+   atomic<u64> demotionBatches;   // Number of demotion batch operations
 
    Page* virtMem;
    PageState* pageState;
@@ -833,10 +853,15 @@ BufferManager::BufferManager() {
    }
 
    // 4-parameter migration policy (Hyrise-style)
-   dramReadRatio = envOrDouble("DRAM_READ_RATIO", 1.0);
-   dramWriteRatio = envOrDouble("DRAM_WRITE_RATIO", 1.0);
-   numaReadRatio = envOrDouble("NUMA_READ_RATIO", 1.0);
-   numaWriteRatio = envOrDouble("NUMA_WRITE_RATIO", 1.0);
+   userDramReadRatio = envOrDouble("DRAM_READ_RATIO", 1.0);
+   userDramWriteRatio = envOrDouble("DRAM_WRITE_RATIO", 1.0);
+   userNumaReadRatio = envOrDouble("NUMA_READ_RATIO", 1.0);
+   userNumaWriteRatio = envOrDouble("NUMA_WRITE_RATIO", 1.0);
+   // Load phase: bypass REMOTE tier for fast loading
+   dramReadRatio = 1.0;
+   dramWriteRatio = 1.0;
+   numaReadRatio = 0.0;
+   numaWriteRatio = 0.0;
 
    // Promotion configuration
    promoteBatchMin = envOr("PROMOTE_BATCH", 64);
@@ -898,6 +923,8 @@ BufferManager::BufferManager() {
    promotions = 0;
    demotions = 0;
    evictionsToSSD = 0;
+   promotionBatches = 0;
+   demotionBatches = 0;
 
    // Logging
    cerr << "vmcache blk:" << path << " virtgb:" << virtSize/gb
@@ -1041,6 +1068,7 @@ Page* BufferManager::fixX(PID pid) {
 
                      // Track promotions
                      promotions += toPromote.size();
+                     promotionBatches++;
                   }
                }
                return virtMem + pid;
@@ -1069,18 +1097,16 @@ Page* BufferManager::fixS(PID pid) {
          default: {
             // Inline batched promotion from REMOTE to DRAM on read
             if (remotePool && PageState::getTier(stateAndVersion) == PageState::TIER_REMOTE) {
-               if (shouldUseTier(dramReadRatio)) {
+               u64 state = PageState::getState(stateAndVersion);
+               if ((state == PageState::Unlocked || state == PageState::Marked) && shouldUseTier(dramReadRatio)) {
                   // Try to acquire exclusive lock for promotion
                   if (ps.tryLockX(stateAndVersion)) {
                      // Collect batch of hot REMOTE pages
                      vector<PID> toPromote = collectPromotionBatch(pid);
-
                      // Ensure DRAM has space
                      dramPool->ensureFreePages(this, shouldBypassTarget(dramPool, false), toPromote.size());
-
                      // Batch migrate
                      migratePages(toPromote, dramPool->nodeId);
-
                      // Update tracking for all promoted pages
                      for (PID p : toPromote) {
                         remotePool->residentSet->remove(p);
@@ -1102,6 +1128,7 @@ Page* BufferManager::fixS(PID pid) {
 
                      // Track promotions
                      promotions += toPromote.size();
+                     promotionBatches++;
 
                      ps.unlockX();
                      continue;  // Retry to acquire shared lock
@@ -1242,8 +1269,8 @@ vector<PID> BufferManager::collectPromotionBatch(PID currentPid) {
 
    // Scan REMOTE pool for other hot pages to add to batch
    remotePool->residentSet->iterateClockBatch(maxScans, [&](PID pid) {
-      if (batch.size() >= promoteBatchMin) return;  // Target reached
-      if (pid == currentPid) return;                 // Skip current (already in batch)
+      if (batch.size() >= promoteBatchMin) return;    // Target reached
+      if (pid == currentPid) return;                  // Skip current (already in batch)
 
       PageState& ps = getPageState(pid);
       u64 v = ps.stateAndVersion.load();
@@ -1355,11 +1382,23 @@ void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
    for (auto& pid : toWrite) {
       PageState& ps = bm->getPageState(pid);
       u64 v = ps.stateAndVersion;
-      if ((PageState::getState(v) == 1) &&
+      u64 s = PageState::getState(v);
+      if (s == 1 &&
          ps.stateAndVersion.compare_exchange_weak(v, PageState::sameVersion(v, PageState::Locked))) {
-         toEvict.push_back(pid);  // Successfully upgraded
+         toEvict.push_back(pid);  // Successfully upgraded from 1 → Locked
       } else {
-         ps.unlockS();  // Someone else grabbed it, give up
+         ps.unlockS();
+         // Give up: atomically release our shared lock via CAS loop
+         // while (true) {
+         //    v = ps.stateAndVersion.load();
+         //    s = PageState::getState(v);
+         //    if (s > 0 && s <= PageState::MaxShared) {
+         //       if (ps.stateAndVersion.compare_exchange_weak(v, PageState::sameVersion(v, s - 1)))
+         //          break;
+         //    } else {
+         //       break;  // State changed drastically (evicted/locked by someone else); our lock is gone
+         //    }
+         // }
       }
    }
 
@@ -1384,6 +1423,7 @@ void BufferPool::evict(BufferManager* bm, bool bypassTarget, u64 minPages) {
 
       // Track demotions (DRAM→REMOTE or REMOTE→lower tier if exists)
       bm->demotions += toEvict.size();
+      bm->demotionBatches++;
 
    } else {
       // **Path B: Eviction to SSD (no lower tier available)**
@@ -2319,8 +2359,8 @@ int main(int argc, char** argv) {
 
    auto statFn = [&]() {
       cout << "ts,tx,rmb,wmb,system,threads,datasize,workload,batch,"
-           << "dram_used,dram_max,remote_used,remote_max,"
-           << "promotions,demotions,evictions" << endl;
+           << "dram_occupancy,remote_occupancy,"
+           << "promotions,demotions,evictions,avg_promote_batch,avg_demote_batch" << endl;
 
       // Aggregation variables
       u64 total_tx = 0;
@@ -2329,6 +2369,8 @@ int main(int argc, char** argv) {
       u64 total_proms = 0;
       u64 total_demos = 0;
       u64 total_evicts = 0;
+      u64 total_prom_batches = 0;
+      u64 total_demo_batches = 0;
 
       u64 cnt = 0;
       for (uint64_t i=0; i<runForSec; i++) {
@@ -2339,6 +2381,13 @@ int main(int argc, char** argv) {
          u64 proms = bm.promotions.exchange(0);
          u64 demos = bm.demotions.exchange(0);
          u64 evicts = bm.evictionsToSSD.exchange(0);
+         u64 prom_batches = bm.promotionBatches.exchange(0);
+         u64 demo_batches = bm.demotionBatches.exchange(0);
+
+         double dram_occupancy = 100.0 * bm.dramPool->usedCount.load() / bm.dramPool->maxCount;
+         double remote_occupancy = bm.remotePool ? 100.0 * bm.remotePool->usedCount.load() / bm.remotePool->maxCount : 0.0;
+         double avg_prom_batch = prom_batches > 0 ? (double)proms / prom_batches : 0.0;
+         double avg_demo_batch = demo_batches > 0 ? (double)demos / demo_batches : 0.0;
 
          // Accumulate totals
          total_tx += prog;
@@ -2347,14 +2396,15 @@ int main(int argc, char** argv) {
          total_proms += proms;
          total_demos += demos;
          total_evicts += evicts;
+         total_prom_batches += prom_batches;
+         total_demo_batches += demo_batches;
 
          cout << cnt++ << "," << prog << "," << rmb << "," << wmb << ","
               << systemName << "," << nthreads << "," << n << ","
               << (isYcsb ? (std::string("ycsb_") + ycsbType) : (isRndread?"rndread":"tpcc")) << "," << bm.evictBatchSize << ","
-              << bm.dramPool->usedCount.load() << "," << bm.dramPool->maxCount << ","
-              << (bm.remotePool ? bm.remotePool->usedCount.load() : 0) << ","
-              << (bm.remotePool ? bm.remotePool->maxCount : 0) << ","
-              << proms << "," << demos << "," << evicts << endl;
+              << dram_occupancy << "," << remote_occupancy << ","
+              << proms << "," << demos << "," << evicts << ","
+              << avg_prom_batch << "," << avg_demo_batch << endl;
       }
       keepRunning = false;
 
@@ -2366,6 +2416,8 @@ int main(int argc, char** argv) {
       cout << "Avg Promotions/s: " << (total_proms / runForSec) << endl;
       cout << "Avg Demotions/s: " << (total_demos / runForSec) << endl;
       cout << "Avg Evictions/s: " << (total_evicts / runForSec) << endl;
+      cout << "Avg Promote Batch Size: " << (total_prom_batches > 0 ? (double)total_proms / total_prom_batches : 0.0) << endl;
+      cout << "Avg Demote Batch Size: " << (total_demo_batches > 0 ? (double)total_demos / total_demo_batches : 0.0) << endl;
       cout << "Total TX: " << total_tx << endl;
 
    };
@@ -2443,6 +2495,7 @@ int main(int argc, char** argv) {
          // Load phase
          ycsb.load(nthreads, recordCount, parallel_for);
          cerr << "ycsb load done (tuple=" << sizeof(Record) << "B), space: " << (bm.allocCount.load()*pageSize)/(float)bm.gb << " GB " << endl;
+         bm.activateWorkloadRatios();
 
          // Pre-generate operations per thread
          u64 opsPerThread = 10000000ull;
@@ -2518,6 +2571,7 @@ int main(int argc, char** argv) {
       });
    }
    cerr << "space: " << (bm.allocCount.load()*pageSize)/(float)bm.gb << " GB " << endl;
+   bm.activateWorkloadRatios();
 
    bm.readCount = 0;
    bm.writeCount = 0;

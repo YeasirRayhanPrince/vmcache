@@ -4,10 +4,11 @@ set -euo pipefail
 # ── Sweep configuration (edit these arrays) ──────────────────────────
 SWEEP_YCSB=(A B C E F)
 SWEEP_YCSB_TUPLE_SIZE=(56 100 1024 4096)
+SWEEP_ZIPF_THETA=(0.99)
 SWEEP_PHYSGB=(4)
+
 SWEEP_REMOTEGB=(8)
 SWEEP_THREADS=(16)
-SWEEP_ZIPF_THETA=(0.99)
 SWEEP_DATASIZE=(50)
 SWEEP_RUNFOR=(100)
 SWEEP_PROMOTE_BATCH=(1024)
