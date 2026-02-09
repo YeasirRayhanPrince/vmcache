@@ -1,3 +1,34 @@
+The Four Ratios - Verified                                                                                                                                       
+                                                                                                                                                                 
+  // Higher ratio → less bypass → MORE use of tier                                                                                                                 
+  bypass = (rand > ratio)                                                                                                                                          
+
+  // Higher ratio → MORE use of tier
+  use = (rand <= ratio)
+
+  NUMA_READ_RATIO - Initial Placement During Load
+
+  - 0.0 = always bypass REMOTE → 100% go to DRAM ✓
+  - 0.5 = 50% bypass → 50% to DRAM, 50% to REMOTE
+  - 1.0 = never bypass → 100% go to REMOTE
+
+  NUMA_WRITE_RATIO - Eviction Destination
+
+  - 0.0 = always bypass REMOTE → 100% evict directly to SSD
+  - 0.5 = 50% bypass → 50% to SSD, 50% demote to REMOTE
+  - 1.0 = never bypass → 100% demote to REMOTE ✓
+
+  DRAM_READ_RATIO - Promotion from REMOTE to DRAM
+
+  - 0.0 = never promote → pages stay in REMOTE
+  - 0.5 = 50% promote when accessed
+  - 1.0 = always promote → aggressive promotion ✓
+
+  DRAM_WRITE_RATIO - Promotion on Writes
+
+  - Same as DRAM_READ_RATIO but for write operations
+
+
 export BLOCK=/dev/nvme0n1
 export VIRTGB=1024     # >= device size in GB (894GB)
 export PHYSGB=16       # adjust to your available RAM
@@ -254,3 +285,10 @@ bt
 bt full
 info threads
 thread apply all bt
+
+
+
+sudo swapoff -a && sudo swapon -a
+
+
+python3 plot_bench.py --sweep 

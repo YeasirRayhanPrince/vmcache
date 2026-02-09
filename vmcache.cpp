@@ -67,6 +67,48 @@ uint64_t rdtsc() {
    return static_cast<uint64_t>(lo)|(static_cast<uint64_t>(hi)<<32);
 }
 
+struct LatencyHistogram {
+   static constexpr int NUM_BUCKETS = 64;
+   u64 buckets[NUM_BUCKETS] = {};
+   u64 minLat = UINT64_MAX;
+   u64 maxLat = 0;
+   u64 count = 0;
+
+   void record(u64 cycles) {
+      if (cycles < minLat) minLat = cycles;
+      if (cycles > maxLat) maxLat = cycles;
+      int bucket = cycles == 0 ? 0 : (63 - __builtin_clzll(cycles));
+      buckets[bucket]++;
+      count++;
+   }
+
+   u64 percentile(double p) const {
+      u64 target = (u64)(count * p);
+      u64 cumulative = 0;
+      for (int i = 0; i < NUM_BUCKETS; i++) {
+         cumulative += buckets[i];
+         if (cumulative >= target)
+            return 1ULL << i;
+      }
+      return maxLat;
+   }
+
+   void merge(const LatencyHistogram& other) {
+      for (int i = 0; i < NUM_BUCKETS; i++)
+         buckets[i] += other.buckets[i];
+      if (other.minLat < minLat) minLat = other.minLat;
+      if (other.maxLat > maxLat) maxLat = other.maxLat;
+      count += other.count;
+   }
+
+   void reset() {
+      memset(buckets, 0, sizeof(buckets));
+      minLat = UINT64_MAX;
+      maxLat = 0;
+      count = 0;
+   }
+};
+
 // exmap helper function
 static int exmapAction(int exmapfd, exmap_opcode op, u16 len) {
    struct exmap_action_params params_free = { .interface = workerThreadId, .iov_len = len, .opcode = (u16)op, };
@@ -2356,12 +2398,15 @@ int main(int argc, char** argv) {
    u64 statDiff = 1e8;
    atomic<u64> txProgress(0);
    atomic<bool> keepRunning(true);
+   vector<LatencyHistogram> threadLatencies(nthreads);
+   LatencyHistogram globalLatency;  // never reset, for overall p95
    auto systemName = bm.useExmap ? "exmap" : "vmcache";
 
    auto statFn = [&]() {
       cout << "ts,tx,rmb,wmb,system,threads,datasize,workload,batch,"
            << "dram_occupancy,remote_occupancy,"
-           << "promotions,demotions,evictions,avg_promote_batch,avg_demote_batch" << endl;
+           << "promotions,demotions,evictions,avg_promote_batch,avg_demote_batch,"
+           << "lat_min,lat_max,lat_p95" << endl;
 
       // Aggregation variables
       u64 total_tx = 0;
@@ -2390,6 +2435,14 @@ int main(int argc, char** argv) {
          double avg_prom_batch = prom_batches > 0 ? (double)proms / prom_batches : 0.0;
          double avg_demo_batch = demo_batches > 0 ? (double)demos / demo_batches : 0.0;
 
+         // Merge per-thread latency histograms
+         LatencyHistogram merged;
+         for (int t = 0; t < nthreads; t++) {
+            merged.merge(threadLatencies[t]);
+            threadLatencies[t].reset();
+         }
+         globalLatency.merge(merged);
+
          // Accumulate totals
          total_tx += prog;
          total_rmb += rmb;
@@ -2405,7 +2458,9 @@ int main(int argc, char** argv) {
               << (isYcsb ? (std::string("ycsb_") + ycsbType) : (isRndread?"rndread":"tpcc")) << "," << bm.evictBatchSize << ","
               << dram_occupancy << "," << remote_occupancy << ","
               << proms << "," << demos << "," << evicts << ","
-              << avg_prom_batch << "," << avg_demo_batch << endl;
+              << avg_prom_batch << "," << avg_demo_batch << ","
+              << (merged.count > 0 ? merged.minLat : 0) << ","
+              << merged.maxLat << "," << merged.percentile(0.95) << endl;
       }
       keepRunning = false;
 
@@ -2420,6 +2475,9 @@ int main(int argc, char** argv) {
       cout << "Avg Promote Batch Size: " << (total_prom_batches > 0 ? (double)total_proms / total_prom_batches : 0.0) << endl;
       cout << "Avg Demote Batch Size: " << (total_demo_batches > 0 ? (double)total_demos / total_demo_batches : 0.0) << endl;
       cout << "Total TX: " << total_tx << endl;
+      cout << "Lat Min (cycles): " << (globalLatency.count > 0 ? globalLatency.minLat : 0) << endl;
+      cout << "Lat Max (cycles): " << globalLatency.maxLat << endl;
+      cout << "Lat P95 (cycles): " << globalLatency.percentile(0.95) << endl;
 
    };
 
@@ -2450,6 +2508,7 @@ int main(int argc, char** argv) {
          workerThreadId = worker;
          u64 cnt = 0;
          u64 start = rdtsc();
+         u64 opStart = start;
          while (keepRunning.load()) {
             union { u64 v1; u8 k1[sizeof(u64)]; };
             v1 = __builtin_bswap64(RandomGenerator::getRand<u64>(0, n));
@@ -2463,6 +2522,8 @@ int main(int argc, char** argv) {
 
             cnt++;
             u64 stop = rdtsc();
+            threadLatencies[worker].record(stop - opStart);
+            opStart = stop;
             if ((stop-start) > statDiff) {
                txProgress += cnt;
                start = stop;
@@ -2506,6 +2567,7 @@ int main(int argc, char** argv) {
             workerThreadId = worker;
             u64 cnt = 0;
             u64 start = rdtsc();
+            u64 opStart = start;
 
             // Generate operations on-the-fly like TPC-C (no pre-generation, no shuffle)
             std::mt19937_64 gen(42 + worker);
@@ -2530,6 +2592,8 @@ int main(int argc, char** argv) {
                ycsb.executeOp(op);
                cnt++;
                u64 stop = rdtsc();
+               threadLatencies[worker].record(stop - opStart);
+               opStart = stop;
                if ((stop - start) > statDiff) {
                   txProgress += cnt;
                   start = stop;
@@ -2596,11 +2660,14 @@ int main(int argc, char** argv) {
       workerThreadId = worker;
       u64 cnt = 0;
       u64 start = rdtsc();
+      u64 opStart = start;
       while (keepRunning.load()) {
          int w_id = tpcc.urand(1, warehouseCount); // wh crossing
          tpcc.tx(w_id);
          cnt++;
          u64 stop = rdtsc();
+         threadLatencies[worker].record(stop - opStart);
+         opStart = stop;
          if ((stop-start) > statDiff) {
             txProgress += cnt;
             start = stop;

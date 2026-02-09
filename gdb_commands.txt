@@ -1,0 +1,22 @@
+set pagination off
+set breakpoint pending on
+catch signal SIGABRT
+run
+bt
+thread apply all bt
+info threads
+quit
+
+
+
+
+source vmcache_env.sh
+sudo -E gdb --args numactl --cpubind=0 ./vmcache
+break __assert_fail
+
+run
+# when it crashes:
+bt
+bt full
+info threads
+thread apply all bt

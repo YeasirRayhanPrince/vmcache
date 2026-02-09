@@ -2,3 +2,6 @@ vmcache
 vmcache_old
 vmcache_debug
 *~
+# bench_results
+bench_plots
+.vscode
