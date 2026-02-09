@@ -32,7 +32,7 @@ export REMOTE_NODE=${REMOTE_NODE:-1}
 
 # Benchmark and eviction configuration
 export RUNFOR=${RUNFOR:-500}
-export RNDREAD=${RNDREAD:-0}
+export RNDREAD=${RNDREAD:-1}
 export THREADS=${THREADS:-32}
 export DATASIZE=${DATASIZE:-1000}
 
