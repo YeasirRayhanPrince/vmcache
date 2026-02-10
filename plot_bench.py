@@ -11,6 +11,7 @@ def main():
     parser.add_argument("--sweep", required=True, nargs="+", help="Sweep ID timestamp(s) (e.g., 20260208_193523)")
     parser.add_argument("--outdir", default="bench_plots", help="Output directory for figures")
     parser.add_argument("--skip", type=int, default=0, help="Seconds to skip from start (warmup)")
+    parser.add_argument("--ycsb", action="store_true", help="Plot YCSB results (from bench_results_ycsb/)")
     parser.add_argument("--eb", nargs="+", type=int, help="Filter EVICT_BATCH values")
     parser.add_argument("--pb", nargs="+", type=int, help="Filter PROMOTE_BATCH values")
     parser.add_argument("--nm", nargs="+", type=int, help="Filter NUMA_MIGRATE_METHOD values")
@@ -19,6 +20,10 @@ def main():
     parser.add_argument("--t", nargs="+", type=int, help="Filter THREADS values")
     parser.add_argument("--ebs", nargs="+", type=int, help="Filter EVICT_BATCH_SSD values")
     parser.add_argument("--pbsm", nargs="+", type=int, help="Filter PROMOTE_BATCH_SCAN_MULTIPLIER values")
+    parser.add_argument("--workload", nargs="+", help="Filter YCSB workload letters (e.g., A C)")
+    parser.add_argument("--zipf", nargs="+", type=float, help="Filter ZIPF_THETA values")
+    parser.add_argument("--ts", nargs="+", type=int, help="Filter YCSB_TUPLE_SIZE values")
+    parser.add_argument("--sel", nargs="+", help="Filter YCSB_SCAN_SELECTIVITY values")
     args = parser.parse_args()
 
     # Map CLI filter flags to config keys
@@ -31,13 +36,18 @@ def main():
         "THREADS": args.t,
         "EVICT_BATCH_SSD": args.ebs,
         "PROMOTE_BATCH_SCAN_MULTIPLIER": args.pbsm,
+        "YCSB": args.workload,
+        "ZIPF_THETA": args.zipf,
+        "YCSB_TUPLE_SIZE": args.ts,
+        "YCSB_SCAN_SELECTIVITY": args.sel,
     }
     filters = {k: v for k, v in filters.items() if v is not None}
 
     os.makedirs(args.outdir, exist_ok=True)
     runs = []
     for sweep_id in args.sweep:
-        summary_path = os.path.join("bench_results", f"{sweep_id}_summary.jsonl")
+        results_dir = "bench_results_ycsb" if args.ycsb else "bench_results"
+        summary_path = os.path.join(results_dir, f"{sweep_id}_summary.jsonl")
         with open(summary_path) as f:
             for line in f:
                 line = line.strip()
@@ -46,7 +56,7 @@ def main():
 
     # Apply filters
     if filters:
-        runs = [r for r in runs if all(r.get(k) in v for k, v in filters.items())]
+        runs = [r for r in runs if all(str(r.get(k)) in [str(x) for x in v] for k, v in filters.items())]
         if not runs:
             print("No runs match the given filters.")
             return
@@ -73,6 +83,10 @@ def main():
         "MOVE_PAGES2_MAX_BATCH_SIZE": "mp2b",
         "PROMOTE_BATCH_SCAN_MULTIPLIER": "pbsm",
         "EVICT_BATCH_SSD": "ebs",
+        "YCSB": "ycsb",
+        "ZIPF_THETA": "zipf",
+        "YCSB_TUPLE_SIZE": "ts",
+        "YCSB_SCAN_SELECTIVITY": "sel",
     }
 
     # Build subtitle from constant parameters
