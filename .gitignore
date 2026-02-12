@@ -5,3 +5,8 @@ vmcache_debug
 # bench_results
 bench_plots
 .vscode
+bench_results/
+bench_results/*
+!bench_results/___summary.txt
+
+
