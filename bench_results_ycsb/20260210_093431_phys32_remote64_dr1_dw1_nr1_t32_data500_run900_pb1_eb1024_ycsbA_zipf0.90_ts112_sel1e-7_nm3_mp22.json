@@ -1,0 +1,33 @@
+{
+  "timestamp": "20260210_103610",
+  "sweep_id": "20260210_093431",
+  "tag": "20260210_093431_phys32_remote64_dr1_dw1_nr1_t32_data500_run900_pb1_eb1024_ycsbA_zipf0.90_ts112_sel1e-7_nm3_mp22",
+  "logfile": "bench_results_ycsb/20260210_093431_phys32_remote64_dr1_dw1_nr1_t32_data500_run900_pb1_eb1024_ycsbA_zipf0.90_ts112_sel1e-7_nm3_mp22.log",
+  "config": {
+    "PHYSGB": 32,
+    "REMOTEGB": 64,
+    "DRAM_READ_RATIO": 1,
+    "DRAM_WRITE_RATIO": 1,
+    "NUMA_READ_RATIO": 1,
+    "THREADS": 32,
+    "DATASIZE": 500,
+    "RUNFOR": 900,
+    "PROMOTE_BATCH": 1,
+    "EVICT_BATCH": 1024,
+    "YCSB": "A",
+    "ZIPF_THETA": 0.90,
+    "YCSB_TUPLE_SIZE": 112,
+    "YCSB_SCAN_SELECTIVITY": "1e-7",
+    "NUMA_MIGRATE_METHOD": 3,
+    "MOVE_PAGES2_MODE": 2,
+    "MOVE_PAGES2_MAX_BATCH_SIZE": 1024,
+    "BLOCK": "/dev/nvme0n1",
+    "EXMAP": 0,
+    "VIRTGB": 894,
+    "DRAM_NODE": 0,
+    "REMOTE_NODE": 1,
+    "NUMA_WRITE_RATIO": 1,
+    "EVICT_BATCH_SSD": 64,
+    "PROMOTE_BATCH_SCAN_MULTIPLIER": 2
+  }
+}

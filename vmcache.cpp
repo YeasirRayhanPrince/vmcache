@@ -2499,6 +2499,7 @@ int main(int argc, char** argv) {
          });
       }
       cerr << "space: " << (bm.allocCount.load()*pageSize)/(float)bm.gb << " GB " << endl;
+      bm.activateWorkloadRatios();
 
       bm.readCount = 0;
       bm.writeCount = 0;

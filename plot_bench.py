@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--zipf", nargs="+", type=float, help="Filter ZIPF_THETA values")
     parser.add_argument("--ts", nargs="+", type=int, help="Filter YCSB_TUPLE_SIZE values")
     parser.add_argument("--sel", nargs="+", help="Filter YCSB_SCAN_SELECTIVITY values")
+    parser.add_argument("--remo", nargs="+", type=int, help="Filter REMOTEGB values")
     args = parser.parse_args()
 
     # Map CLI filter flags to config keys
@@ -40,6 +41,7 @@ def main():
         "ZIPF_THETA": args.zipf,
         "YCSB_TUPLE_SIZE": args.ts,
         "YCSB_SCAN_SELECTIVITY": args.sel,
+        "REMOTEGB": args.remo,
     }
     filters = {k: v for k, v in filters.items() if v is not None}
 
@@ -56,14 +58,15 @@ def main():
 
     # Apply filters
     if filters:
-        runs = [r for r in runs if all(str(r.get(k)) in [str(x) for x in v] for k, v in filters.items())]
+        runs = [r for r in runs if all(k not in r or str(r[k]) in [str(x) for x in v] for k, v in filters.items())]
         if not runs:
             print("No runs match the given filters.")
             return
 
     # Auto-detect varying parameters
     skip_keys = {"timestamp", "sweep_id", "tag", "logfile"}
-    config_keys = [k for k in runs[0] if k not in skip_keys]
+    all_keys = dict.fromkeys(k for r in runs for k in r if k not in skip_keys)
+    config_keys = list(all_keys)
     varying = []
     for k in config_keys:
         vals = set(str(r.get(k)) for r in runs)
@@ -87,6 +90,7 @@ def main():
         "ZIPF_THETA": "zipf",
         "YCSB_TUPLE_SIZE": "ts",
         "YCSB_SCAN_SELECTIVITY": "sel",
+        "REMOTEGB": "remo",
     }
 
     # Build subtitle from constant parameters
@@ -94,14 +98,14 @@ def main():
     const_parts = []
     for k in constant:
         name = short.get(k, k.lower()[:4])
-        const_parts.append(f"{name}={runs[0][k]}")
+        const_parts.append(f"{name}={runs[0].get(k, '?')}")
     subtitle = ", ".join(const_parts)
 
     def make_label(run):
         parts = []
         for k in varying:
             name = short.get(k, k.lower()[:4])
-            parts.append(f"{name}={run[k]}")
+            parts.append(f"{name}={run.get(k, '?')}")
         return ", ".join(parts) if parts else run["tag"]
 
     # Parse log data for each run
@@ -147,12 +151,14 @@ def main():
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Transactions/sec")
     ax1.set_title(f"Transactions/sec — sweep {sweep_label}\n{subtitle}", fontsize=10)
+    # if len(run_data) <= 10:
     ax1.legend(fontsize="small")
     ax1.grid(True, alpha=0.3)
     fig1.tight_layout()
     fig1.savefig(os.path.join(args.outdir, f"{sweep_label}_tx.png"), dpi=150)
+    print(f"Saved: {args.outdir}/{sweep_label}_tx.png")
 
-    # Figure 2: IO MB/s vs Time
+    # Figure 2: IO MB/s vs Time (2 lines per run: read + write)
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for rd in run_data:
         ax2.plot(rd["ts"], rd["rmb"], label=f'{rd["label"]} (read)', linestyle="-")
@@ -160,13 +166,13 @@ def main():
     ax2.set_xlabel("Time (s)")
     ax2.set_ylabel("MB/s")
     ax2.set_title(f"IO MB/s — sweep {sweep_label}\n{subtitle}", fontsize=10)
-    ax2.legend(fontsize="small")
+    if 2 * len(run_data) <= 10:
+        ax2.legend(fontsize="small")
     ax2.grid(True, alpha=0.3)
     fig2.tight_layout()
     fig2.savefig(os.path.join(args.outdir, f"{sweep_label}_io.png"), dpi=150)
-
-    print(f"Saved: {args.outdir}/{sweep_label}_tx.png")
     print(f"Saved: {args.outdir}/{sweep_label}_io.png")
+
     plt.show()
 
 

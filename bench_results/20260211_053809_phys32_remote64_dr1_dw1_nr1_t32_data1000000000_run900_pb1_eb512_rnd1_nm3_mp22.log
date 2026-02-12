@@ -1,0 +1,1 @@
+vmcache blk:/dev/nvme0n1 virtgb:894 physgb:32 remotegb:64 nodes:[0,1] policy:[dr=1,dw=1,nr=0,nw=0] promote:[min=1,scan_mult=2] migrate:[method=3,batch_sz=512,mode=2] exmap:0
