@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--ts", nargs="+", type=int, help="Filter YCSB_TUPLE_SIZE values")
     parser.add_argument("--sel", nargs="+", help="Filter YCSB_SCAN_SELECTIVITY values")
     parser.add_argument("--remo", nargs="+", type=int, help="Filter REMOTEGB values")
+    parser.add_argument("--smooth", type=int, default=1,
+                        help="Rolling-average window size (default: 1 = no smoothing)")
     args = parser.parse_args()
 
     # Map CLI filter flags to config keys
@@ -142,12 +144,22 @@ def main():
             "ts": ts_list, "tx": tx_list, "rmb": rmb_list, "wmb": wmb_list,
         })
 
+    def rolling_mean(data, w):
+        if w <= 1:
+            return data
+        result = []
+        for i in range(len(data)):
+            lo = max(0, i - w // 2)
+            hi = min(len(data), i + w // 2 + 1)
+            result.append(sum(data[lo:hi]) / (hi - lo))
+        return result
+
     sweep_label = "+".join(args.sweep)
 
     # Figure 1: Transactions/sec vs Time
     fig1, ax1 = plt.subplots(figsize=(12, 6))
     for rd in run_data:
-        ax1.plot(rd["ts"], rd["tx"], label=rd["label"])
+        ax1.plot(rd["ts"], rolling_mean(rd["tx"], args.smooth), label=rd["label"])
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Transactions/sec")
     ax1.set_title(f"Transactions/sec — sweep {sweep_label}\n{subtitle}", fontsize=10)
@@ -161,8 +173,8 @@ def main():
     # Figure 2: IO MB/s vs Time (2 lines per run: read + write)
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for rd in run_data:
-        ax2.plot(rd["ts"], rd["rmb"], label=f'{rd["label"]} (read)', linestyle="-")
-        ax2.plot(rd["ts"], rd["wmb"], label=f'{rd["label"]} (write)', linestyle="--")
+        ax2.plot(rd["ts"], rolling_mean(rd["rmb"], args.smooth), label=f'{rd["label"]} (read)', linestyle="-")
+        ax2.plot(rd["ts"], rolling_mean(rd["wmb"], args.smooth), label=f'{rd["label"]} (write)', linestyle="--")
     ax2.set_xlabel("Time (s)")
     ax2.set_ylabel("MB/s")
     ax2.set_title(f"IO MB/s — sweep {sweep_label}\n{subtitle}", fontsize=10)
