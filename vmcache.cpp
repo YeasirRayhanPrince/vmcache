@@ -588,6 +588,34 @@ struct GuardO {
                }
                break;
             default:
+               // Inline REMOTE→DRAM promotion on read (mirrors fixS promotion logic)
+               if (bm.remotePool && PageState::getTier(v) == PageState::TIER_REMOTE) {
+                  u64 state = PageState::getState(v);
+                  if (state == PageState::Unlocked && shouldUseTier(bm.dramReadRatio)) {
+                     if (ps.tryLockX(v)) {
+                        vector<PID> toPromote = bm.collectPromotionBatch(pid);
+                        bm.dramPool->ensureFreePages(&bm, bm.shouldBypassTarget(bm.dramPool, false), toPromote.size());
+                        bm.migratePages(toPromote, bm.dramPool->nodeId);
+                        for (PID p : toPromote) {
+                           bm.remotePool->residentSet->remove(p);
+                           bm.dramPool->residentSet->insert(p);
+                           u64 vv = bm.getPageState(p).stateAndVersion.load();
+                           bm.getPageState(p).stateAndVersion.store(
+                              PageState::withTier(vv, PageState::TIER_DRAM),
+                              std::memory_order_relaxed
+                           );
+                           if (p != pid) bm.getPageState(p).unlockX();
+                        }
+                        bm.remotePool->usedCount -= toPromote.size();
+                        bm.dramPool->usedCount += toPromote.size();
+                        bm.promotions += toPromote.size();
+                        bm.promotionBatches++;
+                        ps.unlockX();
+                        continue; // retry: page is now TIER_DRAM, read optimistically
+                     }
+                     // tryLockX failed: best-effort, fall through to read from REMOTE
+                  }
+               }
                version = v;
                return;
          }

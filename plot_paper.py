@@ -3,6 +3,7 @@ import argparse
 import json
 import csv
 import os
+import re
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
@@ -34,6 +35,8 @@ def main():
                         help="Remap remo=N labels to vmcache / vmcache+(N) display names")
     parser.add_argument("--nm-label", action="store_true", dest="nm_label",
                         help="Remap nm=N labels to descriptive migration method display names")
+    parser.add_argument("--no-legend", action="store_true", dest="no_legend",
+                        help="Hide the legend")
     args = parser.parse_args()
 
     # Map CLI filter flags to config keys
@@ -140,6 +143,9 @@ def main():
             return f"move_pages2 ({bs})"
         return f"nm={nm}({bs})"
 
+    # Fixed color per REMOTEGB value so colors are stable across plots
+    remo_colors = {0: "C0", 8: "C1", 16: "C2", 32: "C3", 64: "C4", 128: "C5"}
+
     # Parse log data for each run
     run_data = []
     for run in runs:
@@ -182,6 +188,22 @@ def main():
             display_label = nm_display_label(run)
         else:
             display_label = raw_label
+        # Determine color from REMOTEGB config key; fall back to parsing the display label
+        remo_key = None
+        try:
+            val = run.get("REMOTEGB")
+            if val is not None:
+                remo_key = int(val)
+        except (TypeError, ValueError):
+            pass
+        if remo_key is None:
+            if display_label == "vmcache":
+                remo_key = 0
+            else:
+                m = re.search(r'\((\d+)\)', display_label)
+                if m:
+                    remo_key = int(m.group(1))
+        remo_color = remo_colors.get(remo_key, f"C{len(run_data)}") if remo_key is not None else f"C{len(run_data)}"
         run_data.append({
             "label": display_label,
             "ts": ts_list,
@@ -190,6 +212,7 @@ def main():
             "wmb": wmb_list,
             "total_io": total_io,
             "total_movement": total_movement,
+            "color": remo_color,
         })
 
     def rolling_mean(data, w):
@@ -202,6 +225,11 @@ def main():
             result.append(sum(data[lo:hi]) / (hi - lo))
         return result
 
+    print("Average transactions/sec:")
+    for rd in run_data:
+        if rd["tx"]:
+            print(f"  {rd['label']}: {sum(rd['tx']) / len(rd['tx']):.0f}")
+
     sweep_label = "+".join(args.sweep)
     out_name = args.out if args.out else sweep_label
 
@@ -210,20 +238,22 @@ def main():
     max_len = max((len(rd["ts"]) for rd in run_data), default=1)
     markevery = max(1, max_len // 15)
 
-    # 2-row figure
-    fig = plt.figure(figsize=(8, 4))
-    gs = gridspec.GridSpec(2, 1, figure=fig, hspace=0.40)
+    # 2-column figure (horizontally stacked, square subplots)
+    fig = plt.figure(figsize=(4, 2))
+    gs = gridspec.GridSpec(1, 2, figure=fig, wspace=0.4)
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1])
+    ax1.set_box_aspect(1)
+    ax2.set_box_aspect(1)
 
     # Row 1: Transactions / sec
     for i, rd in enumerate(run_data):
-        ax1.plot(rd["ts"], rd["tx"], label=rd["label"], linewidth=0.7,             # colored
-                 marker=markers[i % len(markers)], markevery=markevery, markersize=4)
+        ax1.plot(rd["ts"], rd["tx"], label=rd["label"], linewidth=0.7,
+                 color=rd["color"], marker=markers[i % len(markers)], markevery=markevery, markersize=4)
         # ax1.plot(rd["ts"], rd["tx"], label=rd["label"], linewidth=0.7, color="black",
         #          marker=markers[i % len(markers)], markevery=markevery, markersize=4)
     ax1.set_xlabel("Time [seconds]")
-    ax1.set_ylabel("Transactions / sec")
+    ax1.set_ylabel("Transactions / sec", labelpad=0)
     if args.logy:
         ax1.set_yscale("log")
     ax1.grid(True, alpha=0.3)
@@ -232,39 +262,43 @@ def main():
         # Row 2: Total data movement (promotions + demotions) between memory tiers
         for i, rd in enumerate(run_data):
             smoothed = rolling_mean(rd["total_movement"], args.smooth)
-            ax2.plot(rd["ts"], smoothed, label=rd["label"], linewidth=0.7,  # colored
-                     marker=markers[i % len(markers)], markevery=markevery, markersize=4)
+            ax2.plot(rd["ts"], smoothed, label=rd["label"], linewidth=0.7,
+                     color=rd["color"], marker=markers[i % len(markers)], markevery=markevery, markersize=4)
             # ax2.plot(rd["ts"], smoothed, label=rd["label"], linewidth=0.7, color="black",
             #          marker=markers[i % len(markers)], markevery=markevery, markersize=4)
         ax2.set_xlabel("Time [seconds]")
-        ax2.set_ylabel("Data Movement (pages/s)")
+        ax2.set_ylabel("Data Movement (pages/s)", labelpad=2)
     else:
         # Row 2: Total I/O (read + write) MB/s
         for i, rd in enumerate(run_data):
-            ax2.plot(rd["ts"], rd["total_io"], label=rd["label"], linewidth=0.7,       # colored
-                     marker=markers[i % len(markers)], markevery=markevery, markersize=4)
+            ax2.plot(rd["ts"], rd["total_io"], label=rd["label"], linewidth=0.7,
+                     color=rd["color"], marker=markers[i % len(markers)], markevery=markevery, markersize=4)
             # ax2.plot(rd["ts"], rd["total_io"], label=rd["label"], linewidth=0.7, color="black",
             #          marker=markers[i % len(markers)], markevery=markevery, markersize=4)
         ax2.set_xlabel("Time [seconds]")
-        ax2.set_ylabel("Total I/O (MB/s)")
+        ax2.set_ylabel("Total I/O (MB/s)", labelpad=0)
+        ax2.set_ylim(100)
     if args.logy:
         ax2.set_yscale("log")
     ax2.grid(True, alpha=0.3)
 
     # Single shared legend in one horizontal line above the first subplot
-    handles, labels = ax1.get_legend_handles_labels()
-    
-    legend_pos = (0.1, 1.1)
-    if args.nm_label:
-        legend_pos=(0.5, 1.25)
-    elif args.remo_label:
-        legend_pos=(0.5, 1.45)
+    if not args.no_legend:
+        handles, labels = ax1.get_legend_handles_labels()
 
-    ax1.legend(handles, labels, loc="upper center",
-               bbox_to_anchor=legend_pos,
-               ncol=len(run_data) if args.nm_label else len(run_data)/2,
-               fontsize="small",
-               frameon=True)
+        legend_pos = (1.0, 1.05)
+        if args.nm_label:
+            legend_pos = (1.0, 1.05)
+        elif args.remo_label:
+            legend_pos = (1.15, 1.4)
+
+        ax1.legend(handles, labels, loc="upper center",
+                   bbox_to_anchor=legend_pos,
+                   ncol=len(run_data) if args.nm_label else len(run_data)/2,
+                   fontsize="small",
+                   frameon=True,
+                   columnspacing=0.1,
+                   handletextpad=0.1)
 
     out_path = os.path.join(args.outdir, f"{out_name}_combined.png")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")

@@ -6,10 +6,10 @@ set -euo pipefail
 
 SWEEP_PHYSGB=(32)
 SWEEP_THREADS=(32)
-SWEEP_DATASIZE=(500)
+SWEEP_DATASIZE=(1000000000)
 SWEEP_RUNFOR=(900)
 SWEEP_BATCH=(64)
-SWEEP_RNDREAD=(0)
+SWEEP_RNDREAD=(1)
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────
 # SSD Blocks
