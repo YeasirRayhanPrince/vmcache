@@ -1,0 +1,17 @@
+{
+  "timestamp": "20260213_235605",
+  "sweep_id": "20260213_235605",
+  "tag": "20260213_235605_phys32_t32_data1000000000_run900_batch64_rnd1",
+  "logfile": "bench_results/20260213_235605_phys32_t32_data1000000000_run900_batch64_rnd1.log",
+  "config": {
+    "PHYSGB": 32,
+    "THREADS": 32,
+    "DATASIZE": 1000000000,
+    "RUNFOR": 900,
+    "BATCH": 64,
+    "RNDREAD": 1,
+    "BLOCK": "/dev/nvme0n1",
+    "EXMAP": 0,
+    "VIRTGB": 894
+  }
+}
