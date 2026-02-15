@@ -9,20 +9,21 @@ SWEEP_REMOTEGB=(128)
 SWEEP_DRAM_READ_RATIO=(1)
 SWEEP_DRAM_WRITE_RATIO=(1)
 SWEEP_NUMA_READ_RATIO=(1)
+SWEEP_NUMA_WRITE_RATIO=(1)
 
 
 SWEEP_THREADS=(32)
 # tpcc: 1000 (defaul:warehouses), rndread: record count 1000000000
-SWEEP_DATASIZE=(1000)
+SWEEP_DATASIZE=(1000000000)
 SWEEP_RUNFOR=(900)
 
 SWEEP_PROMOTE_BATCH=(1)
-SWEEP_EVICT_BATCH=(512)
+SWEEP_EVICT_BATCH=(32 64 128 256 512 1024 2048)
 
-SWEEP_RNDREAD=(0)
+SWEEP_RNDREAD=(1)
 
-SWEEP_NUMA_MIGRATE_METHOD=(0 1 2 3)
-SWEEP_MOVE_PAGES2_MODE=(0 1 2)
+SWEEP_NUMA_MIGRATE_METHOD=(3)
+SWEEP_MOVE_PAGES2_MODE=(1 2)
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────
 # SSD Blocks 
@@ -36,8 +37,6 @@ export VIRTGB=${VIRTGB:-894}
 export DRAM_NODE=${DRAM_NODE:-0}
 export REMOTE_NODE=${REMOTE_NODE:-1}
 
-# Multi-tier migration policy (Hyrise-style)
-export NUMA_WRITE_RATIO=${NUMA_WRITE_RATIO:-1}
 
 # Memory -> SSD 
 export EVICT_BATCH_SSD=${EVICT_BATCH_SSD:-64}
@@ -61,6 +60,7 @@ for remote in "${SWEEP_REMOTEGB[@]}"; do
 for dram_r in "${SWEEP_DRAM_READ_RATIO[@]}"; do
 for dram_w in "${SWEEP_DRAM_WRITE_RATIO[@]}"; do
 for numa_r in "${SWEEP_NUMA_READ_RATIO[@]}"; do
+for numa_w in "${SWEEP_NUMA_WRITE_RATIO[@]}"; do
 for threads in "${SWEEP_THREADS[@]}"; do
 for datasize in "${SWEEP_DATASIZE[@]}"; do
 for runfor in "${SWEEP_RUNFOR[@]}"; do
@@ -87,7 +87,7 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
     run_timestamp=$(date +%Y%m%d_%H%M%S)
 
     # Use sweep start time as experiment ID for filenames (prefix)
-    tag="${sweep_start_time}_phys${phys}_remote${remote}_dr${dram_r}_dw${dram_w}_nr${numa_r}_t${threads}_data${datasize}_run${runfor}_pb${pbatch}_eb${ebatch}_rnd${rndread}_nm${numa_method}_mp2${mp2_mode}"
+    tag="${sweep_start_time}_phys${phys}_remote${remote}_dr${dram_r}_dw${dram_w}_nr${numa_r}_nw${numa_w}_t${threads}_data${datasize}_run${runfor}_pb${pbatch}_eb${ebatch}_rnd${rndread}_nm${numa_method}_mp2${mp2_mode}"
     logfile="bench_results/${tag}.log"
     jsonfile="bench_results/${tag}.json"
 
@@ -96,6 +96,7 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
     export DRAM_READ_RATIO="$dram_r"
     export DRAM_WRITE_RATIO="$dram_w"
     export NUMA_READ_RATIO="$numa_r"
+    export NUMA_WRITE_RATIO="$numa_w"
     export THREADS="$threads"
     export DATASIZE="$datasize"
     export RUNFOR="$runfor"
@@ -104,7 +105,7 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
     export RNDREAD="$rndread"
     export NUMA_MIGRATE_METHOD="$numa_method"
     export MOVE_PAGES2_MODE="$mp2_mode"
-    export MOVE_PAGES2_MAX_BATCH_SIZE="$ebatch"
+    export MOVE_PAGES2_MAX_BATCH_SIZE="$((ebatch * 2))"
 
     # Create JSON summary for this run
     cat > "$jsonfile" <<EOF
@@ -127,7 +128,7 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
     "RNDREAD": $rndread,
     "NUMA_MIGRATE_METHOD": $numa_method,
     "MOVE_PAGES2_MODE": $mp2_mode,
-    "MOVE_PAGES2_MAX_BATCH_SIZE": $ebatch,
+    "MOVE_PAGES2_MAX_BATCH_SIZE": $((ebatch * 2)),
     "BLOCK": "$BLOCK",
     "EXMAP": $EXMAP,
     "VIRTGB": $VIRTGB,
@@ -141,11 +142,11 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
 EOF
 
     # Append to summary file (one line per run)
-    echo "{\"timestamp\":\"$run_timestamp\",\"sweep_id\":\"$sweep_start_time\",\"tag\":\"$tag\",\"logfile\":\"$logfile\",\"PHYSGB\":$phys,\"REMOTEGB\":$remote,\"DRAM_READ_RATIO\":$dram_r,\"DRAM_WRITE_RATIO\":$dram_w,\"NUMA_READ_RATIO\":$numa_r,\"THREADS\":$threads,\"DATASIZE\":$datasize,\"RUNFOR\":$runfor,\"PROMOTE_BATCH\":$pbatch,\"EVICT_BATCH\":$ebatch,\"RNDREAD\":$rndread,\"NUMA_MIGRATE_METHOD\":$numa_method,\"MOVE_PAGES2_MODE\":$mp2_mode,\"MOVE_PAGES2_MAX_BATCH_SIZE\":$ebatch,\"BLOCK\":\"$BLOCK\",\"EXMAP\":$EXMAP,\"VIRTGB\":$VIRTGB,\"DRAM_NODE\":$DRAM_NODE,\"REMOTE_NODE\":$REMOTE_NODE,\"NUMA_WRITE_RATIO\":$NUMA_WRITE_RATIO,\"EVICT_BATCH_SSD\":$EVICT_BATCH_SSD,\"PROMOTE_BATCH_SCAN_MULTIPLIER\":$PROMOTE_BATCH_SCAN_MULTIPLIER}" >> "$summary_file"
+    echo "{\"timestamp\":\"$run_timestamp\",\"sweep_id\":\"$sweep_start_time\",\"tag\":\"$tag\",\"logfile\":\"$logfile\",\"PHYSGB\":$phys,\"REMOTEGB\":$remote,\"DRAM_READ_RATIO\":$dram_r,\"DRAM_WRITE_RATIO\":$dram_w,\"NUMA_READ_RATIO\":$numa_r,\"THREADS\":$threads,\"DATASIZE\":$datasize,\"RUNFOR\":$runfor,\"PROMOTE_BATCH\":$pbatch,\"EVICT_BATCH\":$ebatch,\"RNDREAD\":$rndread,\"NUMA_MIGRATE_METHOD\":$numa_method,\"MOVE_PAGES2_MODE\":$mp2_mode,\"MOVE_PAGES2_MAX_BATCH_SIZE\":$((ebatch * 2)),\"BLOCK\":\"$BLOCK\",\"EXMAP\":$EXMAP,\"VIRTGB\":$VIRTGB,\"DRAM_NODE\":$DRAM_NODE,\"REMOTE_NODE\":$REMOTE_NODE,\"NUMA_WRITE_RATIO\":$NUMA_WRITE_RATIO,\"EVICT_BATCH_SSD\":$EVICT_BATCH_SSD,\"PROMOTE_BATCH_SCAN_MULTIPLIER\":$PROMOTE_BATCH_SCAN_MULTIPLIER}" >> "$summary_file"
 
     echo "=== Running: $tag ==="
     sudo -E numactl --cpubind=0 ./vmcache &> "$logfile" || true
 
   done
 
-done; done; done; done; done; done; done; done; done; done; done; done
+done; done; done; done; done; done; done; done; done; done; done; done; done

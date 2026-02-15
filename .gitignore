@@ -1,12 +1,14 @@
 vmcache
 vmcache_old
 vmcache_debug
+vmcache_in-mem
+vmcache_memtrk
 *~
 # bench_results
 bench_plots
 .vscode
 bench_results/
-bench_results/*
-!bench_results/___summary.txt
-
+# bench_results/*
+# !bench_results/___summary.txt
+*o
 

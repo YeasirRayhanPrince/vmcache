@@ -2,6 +2,7 @@
 import argparse
 import json
 import csv
+import math
 import os
 import re
 import matplotlib.pyplot as plt
@@ -37,6 +38,8 @@ def main():
                         help="Remap nm=N labels to descriptive migration method display names")
     parser.add_argument("--no-legend", action="store_true", dest="no_legend",
                         help="Hide the legend")
+    parser.add_argument("--batch-label", action="store_true", dest="batch_label",
+                        help="Scatter plot: avg tx/sec vs nr_max_batched_migration (MOVE_PAGES2_MAX_BATCH_SIZE), colored by MOVE_PAGES2_MODE")
     args = parser.parse_args()
 
     # Map CLI filter flags to config keys
@@ -130,21 +133,27 @@ def main():
             pass
         return "vmcache"
 
-    def nm_display_label(run):
+    def nm_display_label(run, varying):
         nm = str(run.get("NUMA_MIGRATE_METHOD", "?"))
         bs = run.get("EVICT_BATCH", "")
         if nm == "0":
-            return f"mbind ({bs})"
+            return f"mbind ({bs})" if str(bs) == "1" else "mbind"
         elif nm == "1":
-            return f"move_pages ({bs})"
+            return f"mbind ({bs})"
         elif nm == "2":
-            return f"move_pages ({bs})"
+            return "move_pages"
         elif nm == "3":
-            return f"move_pages2 ({bs})"
-        return f"nm={nm}({bs})"
+            return "move_pages2"
+        return f"nm={nm}"
 
     # Fixed color per REMOTEGB value so colors are stable across plots
     remo_colors = {0: "C0", 8: "C1", 16: "C2", 32: "C3", 64: "C4", 128: "C5"}
+    nm_colors = {0: "C0", 1: "C1", 2: "C2", 3: "C3"}
+    mp2m_colors  = {0: "C0", 1: "C1", 2: "C2", 3: "C3"}
+    mp2m_markers = {0: "o",  1: "s",  2: "^",  3: "D"}
+    rndread_markers = {0: "o", 1: "s"}
+    rndread_colors  = {0: "green", 1: "red"}
+    mp2m_labels  = {0: "MIGRATE_ASYNC", 1: "MIGRATE_SYNC", 2: "MIGRATE_SYNC_LIGHT", 3: "mode 3"}
 
     # Parse log data for each run
     run_data = []
@@ -185,25 +194,32 @@ def main():
         if args.remo_label:
             display_label = remo_display_label(run)
         elif args.nm_label:
-            display_label = nm_display_label(run)
+            display_label = nm_display_label(run, varying)
         else:
             display_label = raw_label
-        # Determine color from REMOTEGB config key; fall back to parsing the display label
-        remo_key = None
-        try:
-            val = run.get("REMOTEGB")
-            if val is not None:
-                remo_key = int(val)
-        except (TypeError, ValueError):
-            pass
-        if remo_key is None:
-            if display_label == "vmcache":
-                remo_key = 0
-            else:
-                m = re.search(r'\((\d+)\)', display_label)
-                if m:
-                    remo_key = int(m.group(1))
-        remo_color = remo_colors.get(remo_key, f"C{len(run_data)}") if remo_key is not None else f"C{len(run_data)}"
+        # Determine color: nm_colors when --nm-label, else REMOTEGB-based remo_colors
+        if args.nm_label:
+            try:
+                nm_val = int(run.get("NUMA_MIGRATE_METHOD"))
+                remo_color = nm_colors.get(nm_val, f"C{len(run_data)}")
+            except (TypeError, ValueError):
+                remo_color = f"C{len(run_data)}"
+        else:
+            remo_key = None
+            try:
+                val = run.get("REMOTEGB")
+                if val is not None:
+                    remo_key = int(val)
+            except (TypeError, ValueError):
+                pass
+            if remo_key is None:
+                if display_label == "vmcache":
+                    remo_key = 0
+                else:
+                    m = re.search(r'\((\d+)\)', display_label)
+                    if m:
+                        remo_key = int(m.group(1))
+            remo_color = remo_colors.get(remo_key, f"C{len(run_data)}") if remo_key is not None else f"C{len(run_data)}"
         run_data.append({
             "label": display_label,
             "ts": ts_list,
@@ -229,9 +245,66 @@ def main():
     for rd in run_data:
         if rd["tx"]:
             print(f"  {rd['label']}: {sum(rd['tx']) / len(rd['tx']):.0f}")
+    print("Average page transfers/sec:")
+    for rd in run_data:
+        if rd["total_movement"]:
+            print(f"  {rd['label']}: {sum(rd['total_movement']) / len(rd['total_movement']):.0f}")
+    print("Average disk I/O MB/s:")
+    for rd in run_data:
+        if rd["total_io"]:
+            print(f"  {rd['label']}: {sum(rd['total_io']) / len(rd['total_io']):.1f}")
 
     sweep_label = "+".join(args.sweep)
     out_name = args.out if args.out else sweep_label
+
+    if args.batch_label:
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.set_box_aspect(1)
+
+        seen_combos = {}
+        pairs = sorted(zip(run_data, runs),
+                       key=lambda p: 0 if int(p[1].get("MOVE_PAGES2_MODE", 0) or 0) != 0 else 1)
+        for rd_run, run in pairs:
+            avg_tx   = sum(rd_run["tx"]) / len(rd_run["tx"]) if rd_run["tx"] else 0
+            mp2b_val = run.get("MOVE_PAGES2_MAX_BATCH_SIZE", 1)
+            if int(mp2b_val) == 1:
+                continue
+            try:
+                mp2m_val = int(run.get("MOVE_PAGES2_MODE", 0))
+            except (TypeError, ValueError):
+                mp2m_val = 0
+            try:
+                rr_val = int(run.get("RNDREAD", 0))
+            except (TypeError, ValueError):
+                rr_val = 0
+            color  = rndread_colors.get(rr_val, f"C{rr_val}")
+            marker = mp2m_markers.get(mp2m_val, "o")
+            mode_label = mp2m_labels.get(mp2m_val, f"mp2m={mp2m_val}")
+            rr_label   = f"rr={rr_val}"
+            combo_key  = (mp2m_val, rr_val)
+            label = f"{mode_label} / {rr_label}" if combo_key not in seen_combos else "_nolegend_"
+            mp2b_x = math.log2(mp2b_val) if mp2b_val and mp2b_val > 0 else 0
+            ax.scatter(mp2b_x, avg_tx, color=color, marker=marker, s=20, zorder=3, label=label)
+            seen_combos[combo_key] = True
+
+        ax.set_xlabel("NR_MAX_BATCHED_MIGRATION")
+        ax.set_ylabel("Average Transactions / sec")
+        batch_ticks = [64, 128, 256, 512, 1024, 2048, 4096]
+        ax.set_xticks([math.log2(v) for v in batch_ticks])
+        ax.set_xticklabels([f"$2^{{{int(math.log2(v))}}}$" for v in batch_ticks])
+        ax.grid(True, alpha=0.3)
+        if args.logy:
+            ax.set_yscale("log")
+        if not args.no_legend:
+            ax.legend(fontsize="small", frameon=True)
+
+        out_path = os.path.join(args.outdir, f"{out_name}_batch.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        # out_path = os.path.join(args.outdir, f"{out_name}_batch.pdf")
+        # fig.savefig(out_path, bbox_inches="tight")
+        print(f"Saved: {out_path}")
+        plt.show()
+        return
 
     markers = ["o", "s", "^", "D", "v", "P", "X", "*", "h", "<"]
     # Space markers evenly; aim for ~15 visible marks across the longest series
@@ -267,7 +340,7 @@ def main():
             # ax2.plot(rd["ts"], smoothed, label=rd["label"], linewidth=0.7, color="black",
             #          marker=markers[i % len(markers)], markevery=markevery, markersize=4)
         ax2.set_xlabel("Time [seconds]")
-        ax2.set_ylabel("Data Movement (pages/s)", labelpad=2)
+        ax2.set_ylabel("Page Transfers / sec", labelpad=-2)
     else:
         # Row 2: Total I/O (read + write) MB/s
         for i, rd in enumerate(run_data):
@@ -288,22 +361,23 @@ def main():
 
         legend_pos = (1.0, 1.05)
         if args.nm_label:
-            legend_pos = (1.0, 1.05)
+            legend_pos = (1.15, 1.25)
         elif args.remo_label:
             legend_pos = (1.15, 1.4)
 
         ax1.legend(handles, labels, loc="upper center",
                    bbox_to_anchor=legend_pos,
-                   ncol=len(run_data) if args.nm_label else len(run_data)/2,
+                   ncol=len(run_data)//2 if args.remo_label else len(run_data),
                    fontsize="small",
                    frameon=True,
                    columnspacing=0.1,
                    handletextpad=0.1)
 
-    out_path = os.path.join(args.outdir, f"{out_name}_combined.png")
+    suffix = "_remo" if args.remo_label else "_nm" if args.nm_label else "_combined"
+    out_path = os.path.join(args.outdir, f"{out_name}{suffix}.png")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    out_path = os.path.join(args.outdir, f"{out_name}_combined.pdf")
-    fig.savefig(out_path, bbox_inches="tight")
+    # out_path = os.path.join(args.outdir, f"{out_name}{suffix}.pdf")
+    # fig.savefig(out_path, bbox_inches="tight")
     print(f"Saved: {out_path}")
     plt.show()
 

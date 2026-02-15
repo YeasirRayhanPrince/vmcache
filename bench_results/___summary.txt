@@ -4,44 +4,62 @@
 20260211_075226: out-of-memory workload: Disk vmcache
 20260211_085603: out-of-memory workload: 8, 16, 32 GB Remote memory
 
+random read 
+20260213_235605: rand-read, disk
+20260214_002049: all 1s 
+20260214_010607: 0.2s
+20260214_093124: P=[0.1] rndread, 2, 3 (0)
+20260214_185545:  P=[0.1] rndread, nm = 3, mp2m = (1 2) bs = 1024
+20260214_194940: P = [0.1] rndread, nm = 3, mp2m = (1 2) bs = rest
+
+# Probs 
+20260215_021115: [0.5]
+20260215_063808: [1]
+
+
 # different probability 
 20260212_135911: 300 warehouses 1s' bs=512 1024
 20260212_160617: 300 warehouses -.5s' bs=512 1024 2048
 
 # in-memory workload
-20260213_065011: different batch, with defaul setting 64GB remote memory
+20260213_065011: different batch, with default setting 64GB remote memory
+
+
+# mem-trk 
+20260213_130458: disk --- time breakdown (tpc-c)
+20260213_184542: rndread 1B records
+
+# lock-free numa
+does not seem tow work 
 If we make the threshold change, this can get interesting
 If we know the workload is fully in-memory, no locks, let it run wild during migration
 
-# mem-trk 
-20260213_130458: disk --- time breakdown
-
-# lock-free numa
-
-
-
+#move_pages2 with rndread
+20260213_215639
 
 
 20260210_015954: 0.5 out of memory workload
 20260208_220148 20260211_075226 20260211_085603 20260212_002256
-plot 1: 
-plot 2: python plot_paper.py --sweep 20260208_220148 20260212_002256 --eb 1 512 --nm 0 2 3 --remo 64 --mp2m 0 --nm-label --smooth 7
-plot 3.1: python plot_time_breakdown.py --sweep 20260213_130458 --mp2m 0 --rndread 0
+
+----------------------------------------------------------------------------------------
+plots
+----------------------------------------------------------------------------------------
+plot 1.1: python plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy --nm 3 --eb 256 --mp2m 0
+plot 1.2: python plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy
 
 
+plot 2.1: python plot_time_breakdown.py --sweep 20260213_130458 --mp2m 0 --rndread 0
+plot 2.2: python plot_time_breakdown.py --sweep 20260213_184542 
+
+plot 3.1: python plot_paper.py --sweep 20260208_220148 20260212_002256 --eb 1 512 --nm 0 2 3 --remo 64 --mp2m 0 --nm-label --smooth 10 --logy
+plot 3.2: python plot_paper.py --sweep 20260214_150613 20260214_093124 20260214_150613 --nm-label --logy --eb 1 1024 --smooth 10 --no-legend
 
 
+plot 4.1: python plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 --batch-label --nm 3 --mp2m 0 1 2 --logy
 
+[tpc-c]python plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --batch-label --nm 3 --mp2m 0 1 2 --logy
 
-
-
-
-
-
-
-
-
-
+python plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --batch-label --nm 3 --mp2m 0 1 2 --logy
 
 
   ┌─────┬─────────────────┬─────────────────┬──────────────────┬─────────────────┬──────────────────┬────────┬──────────┐
