@@ -6,16 +6,13 @@ set -euo pipefail
 SWEEP_PHYSGB=(32)
 SWEEP_REMOTEGB=(128)
 
-SWEEP_DRAM_READ_RATIO=(1)
-SWEEP_DRAM_WRITE_RATIO=(1)
-SWEEP_NUMA_READ_RATIO=(1)
-SWEEP_NUMA_WRITE_RATIO=(1)
+SWEEP_RATIO=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1)
 
 
 SWEEP_THREADS=(32)
 # tpcc: 1000 (defaul:warehouses), rndread: record count 1000000000
 SWEEP_DATASIZE=(1000000000)
-SWEEP_RUNFOR=(900)
+SWEEP_RUNFOR=(600)
 
 SWEEP_PROMOTE_BATCH=(1)
 SWEEP_EVICT_BATCH=(32 64 128 256 512 1024 2048)
@@ -23,7 +20,7 @@ SWEEP_EVICT_BATCH=(32 64 128 256 512 1024 2048)
 SWEEP_RNDREAD=(1)
 
 SWEEP_NUMA_MIGRATE_METHOD=(3)
-SWEEP_MOVE_PAGES2_MODE=(1 2)
+SWEEP_MOVE_PAGES2_MODE=(0)
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────
 # SSD Blocks 
@@ -57,10 +54,8 @@ summary_file="bench_results/${sweep_start_time}_summary.jsonl"
 
 for phys in "${SWEEP_PHYSGB[@]}"; do
 for remote in "${SWEEP_REMOTEGB[@]}"; do
-for dram_r in "${SWEEP_DRAM_READ_RATIO[@]}"; do
-for dram_w in "${SWEEP_DRAM_WRITE_RATIO[@]}"; do
-for numa_r in "${SWEEP_NUMA_READ_RATIO[@]}"; do
-for numa_w in "${SWEEP_NUMA_WRITE_RATIO[@]}"; do
+for ratio in "${SWEEP_RATIO[@]}"; do
+  dram_r=$ratio; dram_w=$ratio; numa_r=$ratio; numa_w=$ratio
 for threads in "${SWEEP_THREADS[@]}"; do
 for datasize in "${SWEEP_DATASIZE[@]}"; do
 for runfor in "${SWEEP_RUNFOR[@]}"; do
@@ -149,4 +144,4 @@ EOF
 
   done
 
-done; done; done; done; done; done; done; done; done; done; done; done; done
+done; done; done; done; done; done; done; done; done; done

@@ -45,7 +45,7 @@ If we know the workload is fully in-memory, no locks, let it run wild during mig
 plots
 ----------------------------------------------------------------------------------------
 plot 1.1: python plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy --nm 3 --eb 256 --mp2m 0
-plot 1.2: python plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy
+plot 1.2: python plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy --no-legend
 
 
 plot 2.1: python plot_time_breakdown.py --sweep 20260213_130458 --mp2m 0 --rndread 0
@@ -56,6 +56,9 @@ plot 3.2: python plot_paper.py --sweep 20260214_150613 20260214_093124 20260214_
 
 
 plot 4.1: python plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 --batch-label --nm 3 --mp2m 0 1 2 --logy
+plot 4.2: python plot_paper.py --sweep 20260216_010351 --mig-flag
+
+
 
 [tpc-c]python plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --batch-label --nm 3 --mp2m 0 1 2 --logy
 

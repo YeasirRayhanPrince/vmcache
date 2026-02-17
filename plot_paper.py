@@ -7,6 +7,9 @@ import os
 import re
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.lines as mlines
+import matplotlib.patches as mpatches
+from collections import defaultdict
 
 
 def main():
@@ -40,6 +43,8 @@ def main():
                         help="Hide the legend")
     parser.add_argument("--batch-label", action="store_true", dest="batch_label",
                         help="Scatter plot: avg tx/sec vs nr_max_batched_migration (MOVE_PAGES2_MAX_BATCH_SIZE), colored by MOVE_PAGES2_MODE")
+    parser.add_argument("--mig-flag", action="store_true", dest="mig_flag",
+                        help="Line plot: avg tx/sec vs ratio (DRAM/NUMA read/write), one line per NR_MAX_BATCHED_MIGRATION, colored by RNDREAD workload")
     args = parser.parse_args()
 
     # Map CLI filter flags to config keys
@@ -128,7 +133,7 @@ def main():
         try:
             n = int(remotegb)
             if n > 0:
-                return r"vmcache$^+$(" + str(n) + ")"
+                return r"vmcache$^n$(" + str(n) + ")"
         except (TypeError, ValueError):
             pass
         return "vmcache"
@@ -300,8 +305,8 @@ def main():
 
         out_path = os.path.join(args.outdir, f"{out_name}_batch.png")
         fig.savefig(out_path, dpi=150, bbox_inches="tight")
-        # out_path = os.path.join(args.outdir, f"{out_name}_batch.pdf")
-        # fig.savefig(out_path, bbox_inches="tight")
+        out_path = os.path.join(args.outdir, f"{out_name}_batch.pdf")
+        fig.savefig(out_path, bbox_inches="tight")
         print(f"Saved: {out_path}")
         plt.show()
         return
@@ -310,6 +315,72 @@ def main():
     # Space markers evenly; aim for ~15 visible marks across the longest series
     max_len = max((len(rd["ts"]) for rd in run_data), default=1)
     markevery = max(1, max_len // 15)
+
+    if args.mig_flag:
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.set_box_aspect(1)
+
+        group_points = defaultdict(list)
+        for rd, run in zip(run_data, runs):
+            if not rd["tx"]:
+                continue
+            try:
+                rr = int(run.get("RNDREAD", 0) or 0)
+            except (TypeError, ValueError):
+                rr = 0
+            try:
+                mp2b = int(run.get("MOVE_PAGES2_MAX_BATCH_SIZE", 0) or 0)
+            except (TypeError, ValueError):
+                mp2b = 0
+            try:
+                ratio = float(run.get("DRAM_READ_RATIO", 0) or 0)
+            except (TypeError, ValueError):
+                ratio = 0.0
+            avg_tx = sum(rd["tx"]) / len(rd["tx"])
+            group_points[(rr, mp2b)].append((ratio, avg_tx))
+
+        mp2b_values = sorted(set(mp2b for (_, mp2b) in group_points))
+        rr_values = sorted(set(rr for (rr, _) in group_points))
+        rr_colors = {0: "C0", 1: "red"}
+
+        for (rr, mp2b), points in sorted(group_points.items()):
+            points.sort()
+            xs, ys = zip(*points)
+            color = rr_colors.get(rr, f"C{rr}")
+            marker = markers[mp2b_values.index(mp2b) % len(markers)]
+            ax.scatter(xs, ys, color=color, marker=marker, s=20)
+
+        ax.set_xlabel(r"$\mathtt{D_r, D_w, R_r, R_w}$")
+        ax.set_ylabel("Transactions / sec")
+        ax.set_xlim(0, 1.05)
+        ax.set_xticks([i / 10 for i in range(1, 11)])
+        ax.set_xticklabels([f".{i}" if i < 10 else "1" for i in range(1, 11)])
+        ax.grid(True, alpha=0.3)
+        if args.logy:
+            ax.set_yscale("log")
+        if not args.no_legend:
+            mp2b_handles = [
+                mlines.Line2D([], [],
+                              markerfacecolor="white", markeredgecolor="black",
+                              marker=markers[i % len(markers)],
+                              linewidth=0, markersize=6, label=str(mp2b))
+                for i, mp2b in enumerate(mp2b_values)
+            ]
+            rr_handles = [
+                mpatches.Patch(color=rr_colors.get(rr, f"C{rr}"), label={0: "TPC-C", 1: "Read"}.get(rr, f"rndread={rr}"))
+                for rr in rr_values
+            ]
+            ax.legend(handles=mp2b_handles + rr_handles, fontsize="small", frameon=True,
+                      loc="upper center", bbox_to_anchor=(0.5, 1.28),
+                      ncol=4, handletextpad=0.2, columnspacing=0.2)
+
+        out_path = os.path.join(args.outdir, f"{out_name}_mig_ratio.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        out_path = os.path.join(args.outdir, f"{out_name}_mig_ratio.pdf")
+        fig.savefig(out_path, bbox_inches="tight")
+        print(f"Saved: {out_path}")
+        plt.show()
+        return
 
     # 2-column figure (horizontally stacked, square subplots)
     fig = plt.figure(figsize=(4, 2))
@@ -376,8 +447,8 @@ def main():
     suffix = "_remo" if args.remo_label else "_nm" if args.nm_label else "_combined"
     out_path = os.path.join(args.outdir, f"{out_name}{suffix}.png")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    # out_path = os.path.join(args.outdir, f"{out_name}{suffix}.pdf")
-    # fig.savefig(out_path, bbox_inches="tight")
+    out_path = os.path.join(args.outdir, f"{out_name}{suffix}.pdf")
+    fig.savefig(out_path, bbox_inches="tight")
     print(f"Saved: {out_path}")
     plt.show()
 

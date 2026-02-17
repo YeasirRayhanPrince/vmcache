@@ -1,0 +1,30 @@
+{
+  "timestamp": "20260216_172107",
+  "sweep_id": "20260216_065847",
+  "tag": "20260216_065847_phys32_remote128_dr0.7_dw0.7_nr0.7_nw0.7_t32_data1000_run600_pb1_eb512_rnd0_nm3_mp20",
+  "logfile": "bench_results/20260216_065847_phys32_remote128_dr0.7_dw0.7_nr0.7_nw0.7_t32_data1000_run600_pb1_eb512_rnd0_nm3_mp20.log",
+  "config": {
+    "PHYSGB": 32,
+    "REMOTEGB": 128,
+    "DRAM_READ_RATIO": 0.7,
+    "DRAM_WRITE_RATIO": 0.7,
+    "NUMA_READ_RATIO": 0.7,
+    "THREADS": 32,
+    "DATASIZE": 1000,
+    "RUNFOR": 600,
+    "PROMOTE_BATCH": 1,
+    "EVICT_BATCH": 512,
+    "RNDREAD": 0,
+    "NUMA_MIGRATE_METHOD": 3,
+    "MOVE_PAGES2_MODE": 0,
+    "MOVE_PAGES2_MAX_BATCH_SIZE": 1024,
+    "BLOCK": "/dev/nvme0n1",
+    "EXMAP": 0,
+    "VIRTGB": 894,
+    "DRAM_NODE": 0,
+    "REMOTE_NODE": 1,
+    "NUMA_WRITE_RATIO": 0.7,
+    "EVICT_BATCH_SSD": 64,
+    "PROMOTE_BATCH_SCAN_MULTIPLIER": 2
+  }
+}
