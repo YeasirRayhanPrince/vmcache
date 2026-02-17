@@ -348,6 +348,7 @@ def main():
             xs, ys = zip(*points)
             color = rr_colors.get(rr, f"C{rr}")
             marker = markers[mp2b_values.index(mp2b) % len(markers)]
+            # ax.plot(xs, ys, color=color, linewidth=0.4, alpha=0.4)
             ax.scatter(xs, ys, color=color, marker=marker, s=20)
 
         ax.set_xlabel(r"$\mathtt{D_r, D_w, R_r, R_w}$")
