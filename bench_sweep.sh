@@ -6,20 +6,20 @@ set -euo pipefail
 SWEEP_PHYSGB=(32)
 SWEEP_REMOTEGB=(128)
 
-SWEEP_RATIO=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1)
+SWEEP_RATIO=(1)
 
 
 SWEEP_THREADS=(32)
 # tpcc: 1000 (defaul:warehouses), rndread: record count 1000000000
 SWEEP_DATASIZE=(1000000000)
-SWEEP_RUNFOR=(600)
+SWEEP_RUNFOR=(900)
 
 SWEEP_PROMOTE_BATCH=(1)
-SWEEP_EVICT_BATCH=(32 64 128 256 512 1024 2048)
+SWEEP_EVICT_BATCH=(1024)
 
 SWEEP_RNDREAD=(1)
 
-SWEEP_NUMA_MIGRATE_METHOD=(3)
+SWEEP_NUMA_MIGRATE_METHOD=(0 1 3)
 SWEEP_MOVE_PAGES2_MODE=(0)
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────
@@ -140,7 +140,7 @@ EOF
     echo "{\"timestamp\":\"$run_timestamp\",\"sweep_id\":\"$sweep_start_time\",\"tag\":\"$tag\",\"logfile\":\"$logfile\",\"PHYSGB\":$phys,\"REMOTEGB\":$remote,\"DRAM_READ_RATIO\":$dram_r,\"DRAM_WRITE_RATIO\":$dram_w,\"NUMA_READ_RATIO\":$numa_r,\"THREADS\":$threads,\"DATASIZE\":$datasize,\"RUNFOR\":$runfor,\"PROMOTE_BATCH\":$pbatch,\"EVICT_BATCH\":$ebatch,\"RNDREAD\":$rndread,\"NUMA_MIGRATE_METHOD\":$numa_method,\"MOVE_PAGES2_MODE\":$mp2_mode,\"MOVE_PAGES2_MAX_BATCH_SIZE\":$((ebatch * 2)),\"BLOCK\":\"$BLOCK\",\"EXMAP\":$EXMAP,\"VIRTGB\":$VIRTGB,\"DRAM_NODE\":$DRAM_NODE,\"REMOTE_NODE\":$REMOTE_NODE,\"NUMA_WRITE_RATIO\":$NUMA_WRITE_RATIO,\"EVICT_BATCH_SSD\":$EVICT_BATCH_SSD,\"PROMOTE_BATCH_SCAN_MULTIPLIER\":$PROMOTE_BATCH_SCAN_MULTIPLIER}" >> "$summary_file"
 
     echo "=== Running: $tag ==="
-    sudo -E numactl --cpubind=0 ./vmcache &> "$logfile" || true
+    sudo -E numactl --cpubind=0 ./vmcache_memtrk &> "$logfile" || true
 
   done
 

@@ -78,6 +78,14 @@ static u64 calibrateTSC() {
    return (u64)((c1 - c0) / elapsed);
 }
 
+static u64 calibrateSyscallOverhead(u64 iterations = 100000) {
+   u64 t0 = rdtsc();
+   for (u64 i = 0; i < iterations; i++)
+      syscall(SYS_getpid);
+   return (rdtsc() - t0) / iterations;  // cycles per syscall round-trip
+}
+static u64 nullSyscallCycles = 0;  // set at startup alongside tscFreq
+
 struct LatencyHistogram {
    static constexpr int NUM_BUCKETS = 64;
    u64 buckets[NUM_BUCKETS] = {};
@@ -124,7 +132,8 @@ struct alignas(64) ThreadTimeAccum {
    u64 diskIoCycles;
    u64 migrationCycles;        // total: array setup + syscall
    u64 migrationSyscallCycles; // syscall only
-   u64 padding[5];             // keep struct at 64 bytes
+   u64 migrationSyscallCount;  // number of syscall invocations
+   u64 padding[4];             // keep struct at 64 bytes
 };
 
 static ThreadTimeAccum threadTimeAccum[maxWorkerThreads];
@@ -1285,6 +1294,7 @@ void BufferManager::movePagesToNode(const vector<PID>& pids, int targetNode) {
    u64 t_sys = rdtsc();
    long ret = do_move_pages(pids.size(), addrs.data(), nodes.data(), status.data());
    threadTimeAccum[workerThreadId].migrationSyscallCycles += rdtsc() - t_sys;
+   threadTimeAccum[workerThreadId].migrationSyscallCount += 1;
    if (ret != 0) {
       cerr << "move_pages failed: errno=" << errno << endl;
       exit(EXIT_FAILURE);
@@ -1299,6 +1309,7 @@ void BufferManager::migratePagesMethod0(const vector<PID>& pids, int targetNode)
       u64 t_sys = rdtsc();
       int r = mbind(addr, pageSize, MPOL_BIND, &nodemask, 8*sizeof(nodemask), MPOL_MF_MOVE);
       threadTimeAccum[workerThreadId].migrationSyscallCycles += rdtsc() - t_sys;
+      threadTimeAccum[workerThreadId].migrationSyscallCount += 1;
       if (r != 0) {
          cerr << "mbind failed: errno=" << errno << " pid=" << pid << endl;
          exit(EXIT_FAILURE);
@@ -1337,6 +1348,7 @@ void BufferManager::migratePagesMethod3(const vector<PID>& pids, int targetNode)
    long ret = syscall(SYS_move_pages2, pids.size(), addrs.data(),
                       nodes.data(), status.data(), movePages2Mode, movePages2MaxBatchSize);
    threadTimeAccum[workerThreadId].migrationSyscallCycles += rdtsc() - t_sys;
+   threadTimeAccum[workerThreadId].migrationSyscallCount += 1;
    // if (ret != 0) {
    //    cerr << "move_pages2 unavailable, falling back to batched move_pages" << endl;
    //    migratePagesMethod2(pids, targetNode);
@@ -2449,6 +2461,7 @@ int main(int argc, char** argv) {
    }
 
    tscFreq = calibrateTSC();
+   nullSyscallCycles = calibrateSyscallOverhead();
 
    unsigned nthreads = envOr("THREADS", 1);
    u64 n = envOr("DATASIZE", 10);
@@ -2534,14 +2547,16 @@ int main(int argc, char** argv) {
 
          // Time breakdown: collect and report every timeBreakdownInterval seconds
          if (((i + 1) % timeBreakdownInterval == 0) || (i + 1 == runForSec)) {
-            u64 io_cycles = 0, mig_cycles = 0, mig_syscall_cycles = 0;
+            u64 io_cycles = 0, mig_cycles = 0, mig_syscall_cycles = 0, mig_syscall_count = 0;
             for (unsigned t = 0; t < nthreads; t++) {
                io_cycles          += threadTimeAccum[t].diskIoCycles;
                mig_cycles         += threadTimeAccum[t].migrationCycles;
                mig_syscall_cycles += threadTimeAccum[t].migrationSyscallCycles;
+               mig_syscall_count  += threadTimeAccum[t].migrationSyscallCount;
                threadTimeAccum[t].diskIoCycles = 0;
                threadTimeAccum[t].migrationCycles = 0;
                threadTimeAccum[t].migrationSyscallCycles = 0;
+               threadTimeAccum[t].migrationSyscallCount = 0;
             }
             u64 elapsed = (i + 1 == runForSec) ? ((runForSec - 1) % timeBreakdownInterval + 1) : timeBreakdownInterval;
             double io_sec = (double)io_cycles / tscFreq;
@@ -2549,6 +2564,10 @@ int main(int argc, char** argv) {
             double mig_syscall_sec = (double)mig_syscall_cycles / tscFreq;
             double mig_setup_sec = mig_sec - mig_syscall_sec;
             if (mig_setup_sec < 0) mig_setup_sec = 0;
+            // Estimate transition overhead: nullSyscallCycles * count gives lower bound
+            double transition_sec = (double)(nullSyscallCycles * mig_syscall_count) / tscFreq;
+            double kernel_work_sec = mig_syscall_sec - transition_sec;
+            if (kernel_work_sec < 0) kernel_work_sec = 0;
             double budget = (double)nthreads * elapsed;
             double compute_sec = budget - io_sec - mig_sec;
             if (compute_sec < 0) compute_sec = 0;
@@ -2560,9 +2579,10 @@ int main(int argc, char** argv) {
             cerr << "[time-breakdown @ " << (i + 1) << "s] "
                  << "io=" << io_sec << "s (" << io_pct << "%) "
                  << "migration=" << mig_sec << "s (" << mig_pct << "%) "
-                 << "[syscall=" << mig_syscall_sec << "s setup=" << mig_setup_sec << "s] "
+                 << "[syscall=" << mig_syscall_sec << "s: kernel_work=" << kernel_work_sec << "s + transitions=" << transition_sec << "s] "
+                 << "setup=" << mig_setup_sec << "s "
                  << "compute=" << compute_sec << "s (" << compute_pct << "%)"
-                 << " [over " << elapsed << "s, " << nthreads << " threads]" << endl;
+                 << " [over " << elapsed << "s, " << nthreads << " threads, " << mig_syscall_count << " syscalls]" << endl;
          }
       }
       keepRunning = false;
@@ -2619,6 +2639,7 @@ int main(int argc, char** argv) {
          threadTimeAccum[t].diskIoCycles = 0;
          threadTimeAccum[t].migrationCycles = 0;
          threadTimeAccum[t].migrationSyscallCycles = 0;
+         threadTimeAccum[t].migrationSyscallCount = 0;
       }
       thread statThread(statFn);
 
@@ -2683,6 +2704,7 @@ int main(int argc, char** argv) {
             threadTimeAccum[t].diskIoCycles = 0;
             threadTimeAccum[t].migrationCycles = 0;
             threadTimeAccum[t].migrationSyscallCycles = 0;
+            threadTimeAccum[t].migrationSyscallCount = 0;
          }
          thread statThread(statFn);
 
@@ -2781,6 +2803,7 @@ int main(int argc, char** argv) {
       threadTimeAccum[t].diskIoCycles = 0;
       threadTimeAccum[t].migrationCycles = 0;
       threadTimeAccum[t].migrationSyscallCycles = 0;
+      threadTimeAccum[t].migrationSyscallCount = 0;
    }
    thread statThread(statFn);
 
