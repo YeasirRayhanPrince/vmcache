@@ -48,15 +48,18 @@ plot 1.1: python plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_
 plot 1.2: python plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy --no-legend
 
 
+# breakdown
 plot 2.1: python plot_time_breakdown.py --sweep 20260213_130458 --mp2m 0 --rndread 0
 plot 2.2: python plot_time_breakdown.py --sweep 20260213_184542 
 
+# move_pages vs others 
 plot 3.1: python plot_paper.py --sweep 20260208_220148 20260212_002256 --eb 1 512 --nm 0 2 3 --remo 64 --mp2m 0 --nm-label --smooth 10 --logy
 plot 3.2: python plot_paper.py --sweep 20260214_150613 20260214_093124 20260214_150613 --nm-label --logy --eb 1 1024 --smooth 10 --no-legend
 
 
+# ablation
 plot 4.1: python plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 --batch-label --nm 3 --mp2m 0 1 2 --logy
-plot 4.2: python plot_paper.py --sweep 20260216_010351 --mig-flag
+plot 4.2: python plot_paper.py --sweep 20260216_065847 20260216_232913 --mig-flag --logy
 
 
 

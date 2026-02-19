@@ -6,7 +6,7 @@ set -euo pipefail
 SWEEP_PHYSGB=(32)
 SWEEP_REMOTEGB=(128)
 
-SWEEP_RATIO=(1)
+SWEEP_RATIO=(0.1)
 
 
 SWEEP_THREADS=(32)
@@ -19,7 +19,7 @@ SWEEP_EVICT_BATCH=(1024)
 
 SWEEP_RNDREAD=(1)
 
-SWEEP_NUMA_MIGRATE_METHOD=(0 1 3)
+SWEEP_NUMA_MIGRATE_METHOD=(0 2 3)
 SWEEP_MOVE_PAGES2_MODE=(0)
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────

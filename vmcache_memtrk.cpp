@@ -1312,7 +1312,6 @@ void BufferManager::migratePagesMethod0(const vector<PID>& pids, int targetNode)
       threadTimeAccum[workerThreadId].migrationSyscallCount += 1;
       if (r != 0) {
          cerr << "mbind failed: errno=" << errno << " pid=" << pid << endl;
-         exit(EXIT_FAILURE);
       }
    }
 }
@@ -2498,6 +2497,10 @@ int main(int argc, char** argv) {
       u64 total_demo_batches = 0;
       double total_io_sec = 0.0;
       double total_mig_sec = 0.0;
+      double total_mig_syscall_sec = 0.0;
+      double total_kernel_work_sec = 0.0;
+      double total_transition_sec = 0.0;
+      double total_setup_sec = 0.0;
 
       const u64 timeBreakdownInterval = 60; // seconds between time breakdown reports
 
@@ -2576,6 +2579,10 @@ int main(int argc, char** argv) {
             double compute_pct = 100.0 * compute_sec / budget;
             total_io_sec += io_sec;
             total_mig_sec += mig_sec;
+            total_mig_syscall_sec += mig_syscall_sec;
+            total_kernel_work_sec += kernel_work_sec;
+            total_transition_sec += transition_sec;
+            total_setup_sec += mig_setup_sec;
             cerr << "[time-breakdown @ " << (i + 1) << "s] "
                  << "io=" << io_sec << "s (" << io_pct << "%) "
                  << "migration=" << mig_sec << "s (" << mig_pct << "%) "
@@ -2607,8 +2614,16 @@ int main(int argc, char** argv) {
       double avg_compute_sec = nthreads - avg_io_sec - avg_mig_sec;
       if (avg_compute_sec < 0) avg_compute_sec = 0;
       double avg_total = (double)nthreads;
+      double avg_mig_syscall_sec = total_mig_syscall_sec / runForSec;
+      double avg_kernel_work_sec = total_kernel_work_sec / runForSec;
+      double avg_transition_sec = total_transition_sec / runForSec;
+      double avg_setup_sec = total_setup_sec / runForSec;
       cout << "Avg IO sec/s: " << avg_io_sec << " (" << (100.0 * avg_io_sec / avg_total) << "%)" << endl;
       cout << "Avg Migration sec/s: " << avg_mig_sec << " (" << (100.0 * avg_mig_sec / avg_total) << "%)" << endl;
+      cout << "Avg Migration Syscall sec/s: " << avg_mig_syscall_sec << " (" << (100.0 * avg_mig_syscall_sec / avg_total) << "%)" << endl;
+      cout << "Avg Migration Kernel Work sec/s: " << avg_kernel_work_sec << " (" << (100.0 * avg_kernel_work_sec / avg_total) << "%)" << endl;
+      cout << "Avg Migration Transitions sec/s: " << avg_transition_sec << " (" << (100.0 * avg_transition_sec / avg_total) << "%)" << endl;
+      cout << "Avg Migration Setup sec/s: " << avg_setup_sec << " (" << (100.0 * avg_setup_sec / avg_total) << "%)" << endl;
       cout << "Avg Compute sec/s: " << avg_compute_sec << " (" << (100.0 * avg_compute_sec / avg_total) << "%)" << endl;
 
    };
