@@ -4,22 +4,22 @@ set -euo pipefail
 # ── Sweep configuration (edit these arrays) ──────────────────────────
 
 SWEEP_PHYSGB=(32)
-SWEEP_REMOTEGB=(128)
+SWEEP_REMOTEGB=(96)
 
-SWEEP_RATIO=(0.1)
+SWEEP_RATIO=(1)
 
 
 SWEEP_THREADS=(32)
 # tpcc: 1000 (defaul:warehouses), rndread: record count 1000000000
-SWEEP_DATASIZE=(1000000000)
+SWEEP_DATASIZE=(1000)
 SWEEP_RUNFOR=(900)
 
 SWEEP_PROMOTE_BATCH=(1)
-SWEEP_EVICT_BATCH=(1024)
+SWEEP_EVICT_BATCH=(1 256 1024)
 
-SWEEP_RNDREAD=(1)
+SWEEP_RNDREAD=(0)
 
-SWEEP_NUMA_MIGRATE_METHOD=(0 2 3)
+SWEEP_NUMA_MIGRATE_METHOD=(0 1 2 3)
 SWEEP_MOVE_PAGES2_MODE=(0)
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────
@@ -100,7 +100,7 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
     export RNDREAD="$rndread"
     export NUMA_MIGRATE_METHOD="$numa_method"
     export MOVE_PAGES2_MODE="$mp2_mode"
-    export MOVE_PAGES2_MAX_BATCH_SIZE="$((ebatch * 2))"
+    export MOVE_PAGES2_MAX_BATCH_SIZE="$ebatch"
 
     # Create JSON summary for this run
     cat > "$jsonfile" <<EOF
@@ -123,7 +123,7 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
     "RNDREAD": $rndread,
     "NUMA_MIGRATE_METHOD": $numa_method,
     "MOVE_PAGES2_MODE": $mp2_mode,
-    "MOVE_PAGES2_MAX_BATCH_SIZE": $((ebatch * 2)),
+    "MOVE_PAGES2_MAX_BATCH_SIZE": $ebatch,
     "BLOCK": "$BLOCK",
     "EXMAP": $EXMAP,
     "VIRTGB": $VIRTGB,
@@ -137,10 +137,10 @@ for numa_method in "${SWEEP_NUMA_MIGRATE_METHOD[@]}"; do
 EOF
 
     # Append to summary file (one line per run)
-    echo "{\"timestamp\":\"$run_timestamp\",\"sweep_id\":\"$sweep_start_time\",\"tag\":\"$tag\",\"logfile\":\"$logfile\",\"PHYSGB\":$phys,\"REMOTEGB\":$remote,\"DRAM_READ_RATIO\":$dram_r,\"DRAM_WRITE_RATIO\":$dram_w,\"NUMA_READ_RATIO\":$numa_r,\"THREADS\":$threads,\"DATASIZE\":$datasize,\"RUNFOR\":$runfor,\"PROMOTE_BATCH\":$pbatch,\"EVICT_BATCH\":$ebatch,\"RNDREAD\":$rndread,\"NUMA_MIGRATE_METHOD\":$numa_method,\"MOVE_PAGES2_MODE\":$mp2_mode,\"MOVE_PAGES2_MAX_BATCH_SIZE\":$((ebatch * 2)),\"BLOCK\":\"$BLOCK\",\"EXMAP\":$EXMAP,\"VIRTGB\":$VIRTGB,\"DRAM_NODE\":$DRAM_NODE,\"REMOTE_NODE\":$REMOTE_NODE,\"NUMA_WRITE_RATIO\":$NUMA_WRITE_RATIO,\"EVICT_BATCH_SSD\":$EVICT_BATCH_SSD,\"PROMOTE_BATCH_SCAN_MULTIPLIER\":$PROMOTE_BATCH_SCAN_MULTIPLIER}" >> "$summary_file"
+    echo "{\"timestamp\":\"$run_timestamp\",\"sweep_id\":\"$sweep_start_time\",\"tag\":\"$tag\",\"logfile\":\"$logfile\",\"PHYSGB\":$phys,\"REMOTEGB\":$remote,\"DRAM_READ_RATIO\":$dram_r,\"DRAM_WRITE_RATIO\":$dram_w,\"NUMA_READ_RATIO\":$numa_r,\"THREADS\":$threads,\"DATASIZE\":$datasize,\"RUNFOR\":$runfor,\"PROMOTE_BATCH\":$pbatch,\"EVICT_BATCH\":$ebatch,\"RNDREAD\":$rndread,\"NUMA_MIGRATE_METHOD\":$numa_method,\"MOVE_PAGES2_MODE\":$mp2_mode,\"MOVE_PAGES2_MAX_BATCH_SIZE\":$ebatch,\"BLOCK\":\"$BLOCK\",\"EXMAP\":$EXMAP,\"VIRTGB\":$VIRTGB,\"DRAM_NODE\":$DRAM_NODE,\"REMOTE_NODE\":$REMOTE_NODE,\"NUMA_WRITE_RATIO\":$NUMA_WRITE_RATIO,\"EVICT_BATCH_SSD\":$EVICT_BATCH_SSD,\"PROMOTE_BATCH_SCAN_MULTIPLIER\":$PROMOTE_BATCH_SCAN_MULTIPLIER}" >> "$summary_file"
 
     echo "=== Running: $tag ==="
-    sudo -E numactl --cpubind=0 ./vmcache_memtrk &> "$logfile" || true
+    sudo -E numactl --cpubind=0 ./vmcache &> "$logfile" || true
 
   done
 
