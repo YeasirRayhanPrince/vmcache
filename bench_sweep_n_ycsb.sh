@@ -1,54 +1,106 @@
 #!/usr/bin/env bash
+#
+# ══════════════════════════════════════════════════════════════════════
+#  bench_sweep_n_ycsb.sh — YCSB parameter sweep for vmcache-n (3-tier)
+# ══════════════════════════════════════════════════════════════════════
+#
+# WHAT IT RUNS
+#   ./vmcache-n under the YCSB workload. Same binary as bench_sweep_n.sh,
+#   different workload: that script runs TPC-C / random read, this one
+#   runs YCSB A-F with a zipfian key distribution.
+#   The 2-tier baseline cannot run this at all — vmcache-leis has no YCSB.
+#
+# WHAT IT WRITES
+#   bench_results_ycsb/  — note the SEPARATE directory, not bench_results/.
+#   Plot these with `plot_paper.py --ycsb`, which switches the input dir.
+#   Tags additionally carry _ycsb/_zipf/_ts/_sel fields.
+#
+# STATUS
+#   No results from this script are currently committed (there is no
+#   bench_results_ycsb/ in the repo), and no paper figure depends on it.
+#
+# HOW TO USE IT
+#   Edit the arrays below. Unlike bench_sweep_n.sh, these are not yet
+#   environment-overridable.
+#
+# REQUIREMENTS
+#   Same as bench_sweep_n.sh: two NUMA nodes, a block device, passwordless
+#   sudo, and a kernel with move_pages2 (462) for NUMA_MIGRATE_METHOD=3.
+#
 set -euo pipefail
 
-# ── Sweep configuration (edit these arrays) ──────────────────────────
+# ── Swept parameters (Cartesian product) ──────────────────────────────
 
+# DRAM buffer-pool size in GB — the local/fast tier.
 SWEEP_PHYSGB=(32)
+# Remote NUMA tier size in GB. 0 disables the tier.
 SWEEP_REMOTEGB=(64)
 
-SWEEP_DRAM_READ_RATIO=(1)
-SWEEP_DRAM_WRITE_RATIO=(1)
-SWEEP_NUMA_READ_RATIO=(1)
+# Page-migration probabilities, 0.0-1.0. Unlike bench_sweep_n.sh (which
+# ties all four together via SWEEP_RATIO), these are swept individually.
+# The fourth, NUMA_WRITE_RATIO, is fixed below.
+SWEEP_DRAM_READ_RATIO=(1)    # promote REMOTE->DRAM on read
+SWEEP_DRAM_WRITE_RATIO=(1)   # promote REMOTE->DRAM on write
+SWEEP_NUMA_READ_RATIO=(1)    # demote DRAM->REMOTE on read eviction
 
 
+# Worker threads.
 SWEEP_THREADS=(32)
+# Record count for the YCSB table.
 SWEEP_DATASIZE=(1000)
+# Measurement duration per run, in seconds (excludes load time).
 SWEEP_RUNFOR=(900)
 
+# Minimum pages per REMOTE->DRAM promotion batch (1 = no batching).
 SWEEP_PROMOTE_BATCH=(1)
+# Pages per DRAM->REMOTE demotion batch; also caps move_pages2 batches.
 SWEEP_EVICT_BATCH=(1 128 256 512 1024 2048)
 
-# Key = 8 B and total size <= 993
+# YCSB workload mix: A=50/50 r/w, B=95/5, C=read-only, D=read-latest,
+# E=short scans, F=read-modify-write.
 SWEEP_YCSB=(A)
+# Zipfian skew. 0 = uniform; higher = more skewed (0.99 is YCSB default).
 SWEEP_ZIPF_THETA=(0.90)
+# Tuple size in bytes. Key is 8 B and the total must stay <= 993.
 SWEEP_YCSB_TUPLE_SIZE=(112)
+# Fraction of the table touched per scan, for workload E.
 SWEEP_YCSB_SCAN_SELECTIVITY=(1e-7)
 
+# How pages are physically moved between NUMA nodes:
+#   0 = mbind() single, 1 = move_pages() single,
+#   2 = move_pages() batched, 3 = move_pages2() custom syscall.
 SWEEP_NUMA_MIGRATE_METHOD=(0 1 2 3)
+# Flags passed to move_pages2; only meaningful for method 3.
 SWEEP_MOVE_PAGES2_MODE=(0 1 2)
 
-# ── Fixed defaults (inherited unless overridden by sweep) ─────────────
-# SSD Blocks
+# ── Fixed for the whole sweep (override from the environment) ──────────
+
+# Raw block device backing the buffer pool. NOTE: it is written to.
 export BLOCK=${BLOCK:-/dev/nvme0n1}
+# Use the exmap kernel module instead of plain mmap (needs the module).
 export EXMAP=${EXMAP:-0}
 
-# Virtual Memory
+# Virtual address space reserved, in GB. Needs vm.overcommit_memory=1.
 export VIRTGB=${VIRTGB:-894}
 
-# Memory Tiers
+# Which NUMA node is the DRAM tier and which is the remote tier.
 export DRAM_NODE=${DRAM_NODE:-0}
 export REMOTE_NODE=${REMOTE_NODE:-1}
 
-# Multi-tier migration policy (Hyrise-style)
+# The fourth migration ratio: demote DRAM->REMOTE on write eviction.
+# Fixed here rather than swept.
 export NUMA_WRITE_RATIO=${NUMA_WRITE_RATIO:-1}
 
-# Memory -> SSD
+# Pages per write-back batch when evicting all the way out to SSD.
 export EVICT_BATCH_SSD=${EVICT_BATCH_SSD:-64}
 
-# Promotion details
+# Scan window for gathering a promotion batch, as a multiple of
+# PROMOTE_BATCH.
 export PROMOTE_BATCH_SCAN_MULTIPLIER=${PROMOTE_BATCH_SCAN_MULTIPLIER:-2}
 
 # ── Disable NUMA balancing ────────────────────────────────────────────
+# The kernel's automatic NUMA balancing would migrate pages behind the
+# buffer manager's back and corrupt the measurements.
 sudo sh -c 'echo 0 > /proc/sys/kernel/numa_balancing'
 
 # ── Run loop ──────────────────────────────────────────────────────────

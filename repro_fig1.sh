@@ -42,7 +42,7 @@ EVICT_BATCH_LIST="256" \
 RNDREAD_LIST="0" \
 NUMA_MIGRATE_METHOD_LIST="3" \
 MOVE_PAGES2_MODE_LIST="0" \
-  ./bench_sweep.sh
+  ./bench_sweep_n.sh
 
 echo "=== [2/2] vmcache baseline arm ==="
 PHYSGB_LIST="32" \
