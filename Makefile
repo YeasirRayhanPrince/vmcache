@@ -2,6 +2,13 @@
 # vmcache-n     : 3-tier buffer manager (DRAM -> remote NUMA -> SSD). Set REMOTEGB>0
 #                 to enable the remote tier; REMOTEGB=0 falls back to 2-tier.
 # vmcache-leis  : original 2-tier buffer manager (DRAM -> SSD). No NUMA code.
+#
+# `make` or `make all` builds the two binaries the paper figures need.
+# The debug and memtrk builds are opt-in: `make vmcache-n-debug`, etc.
+
+.PHONY: all clean
+
+all: vmcache-n vmcache-leis
 
 vmcache-n: vmcache-n.cpp tpcc/*pp ycsb/*pp
 	g++ -DNDEBUG -O3 -std=c++20 -g -fnon-call-exceptions -fasynchronous-unwind-tables vmcache-n.cpp -o vmcache-n -laio -lnuma

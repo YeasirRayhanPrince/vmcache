@@ -18,7 +18,6 @@ vmcache_in-mem
 vm
 
 # generated
-bench_plots
 __pycache__/
 _scratch
 .vscode
