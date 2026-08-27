@@ -1,14 +1,26 @@
-vmcache
-vmcache_old
-vmcache_debug
-vmcache_in-mem
-vmcache_memtrk
+# build outputs
+vmcache-n
+vmcache-n-debug
+vmcache-n-memtrk
+vmcache-leis
+*.o
 *~
-# bench_results
-bench_plots
-.vscode
-# bench_results/
-# bench_results/*
-# !bench_results/___summary.txt
-*o
 
+# legacy binary names (pre-rename)
+vmcache
+vmcache2
+vmcache_debug
+vmcache_memtrk
+vmcache_old
+vmcache_in-mem
+
+# backing store / data
+vm
+
+# generated
+bench_plots
+__pycache__/
+_scratch
+.vscode
+
+# bench_results is tracked on purpose

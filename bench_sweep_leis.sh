@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # ── Sweep configuration (edit these arrays) ──────────────────────────
-# This script sweeps only the env vars that vmcache2.cpp understands.
+# This script sweeps only the env vars that vmcache-leis.cpp understands
+# (the original 2-tier baseline: DRAM -> SSD, no NUMA tier).
 
 SWEEP_PHYSGB=(32)
 SWEEP_THREADS=(32)
@@ -77,6 +78,6 @@ EOF
     echo "{\"timestamp\":\"$run_timestamp\",\"sweep_id\":\"$sweep_start_time\",\"tag\":\"$tag\",\"logfile\":\"$logfile\",\"PHYSGB\":$phys,\"THREADS\":$threads,\"DATASIZE\":$datasize,\"RUNFOR\":$runfor,\"BATCH\":$batch,\"RNDREAD\":$rndread,\"BLOCK\":\"$BLOCK\",\"EXMAP\":$EXMAP,\"VIRTGB\":$VIRTGB}" >> "$summary_file"
 
     echo "=== Running: $tag ==="
-    sudo -E numactl --cpubind=0 ./vmcache2 &> "$logfile" || true
+    sudo -E numactl --cpubind=0 ./vmcache-leis &> "$logfile" || true
 
 done; done; done; done; done; done

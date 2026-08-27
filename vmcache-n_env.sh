@@ -45,7 +45,7 @@ export YCSB_TUPLE_SIZE=${YCSB_TUPLE_SIZE:-56}
 export YCSB_SCAN_SELECTIVITY=${YCSB_SCAN_SELECTIVITY:-1e-7}
 
 # Execute
-sudo -E numactl --cpubind=0 ./vmcache
+sudo -E numactl --cpubind=0 ./vmcache-n
 
 # sudo swapoff -a && sudo swapon -a
 

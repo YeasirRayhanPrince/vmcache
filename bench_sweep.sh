@@ -140,7 +140,7 @@ EOF
     echo "{\"timestamp\":\"$run_timestamp\",\"sweep_id\":\"$sweep_start_time\",\"tag\":\"$tag\",\"logfile\":\"$logfile\",\"PHYSGB\":$phys,\"REMOTEGB\":$remote,\"DRAM_READ_RATIO\":$dram_r,\"DRAM_WRITE_RATIO\":$dram_w,\"NUMA_READ_RATIO\":$numa_r,\"THREADS\":$threads,\"DATASIZE\":$datasize,\"RUNFOR\":$runfor,\"PROMOTE_BATCH\":$pbatch,\"EVICT_BATCH\":$ebatch,\"RNDREAD\":$rndread,\"NUMA_MIGRATE_METHOD\":$numa_method,\"MOVE_PAGES2_MODE\":$mp2_mode,\"MOVE_PAGES2_MAX_BATCH_SIZE\":$ebatch,\"BLOCK\":\"$BLOCK\",\"EXMAP\":$EXMAP,\"VIRTGB\":$VIRTGB,\"DRAM_NODE\":$DRAM_NODE,\"REMOTE_NODE\":$REMOTE_NODE,\"NUMA_WRITE_RATIO\":$NUMA_WRITE_RATIO,\"EVICT_BATCH_SSD\":$EVICT_BATCH_SSD,\"PROMOTE_BATCH_SCAN_MULTIPLIER\":$PROMOTE_BATCH_SCAN_MULTIPLIER}" >> "$summary_file"
 
     echo "=== Running: $tag ==="
-    sudo -E numactl --cpubind=0 ./vmcache &> "$logfile" || true
+    sudo -E numactl --cpubind=0 ./vmcache-n &> "$logfile" || true
 
   done
 
