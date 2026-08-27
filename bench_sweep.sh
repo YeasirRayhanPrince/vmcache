@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Sweep configuration (edit these arrays) ──────────────────────────
+# ── Sweep configuration ───────────────────────────────────────────────
+# Edit the defaults below, or override any of them from the environment
+# with a space-separated list, e.g.
+#     REMOTEGB_LIST="8 16 32 64 128" ./bench_sweep.sh
+# The repro_fig*.sh presets drive this script that way.
 
-SWEEP_PHYSGB=(32)
-SWEEP_REMOTEGB=(96)
+SWEEP_PHYSGB=(${PHYSGB_LIST:-32})
+SWEEP_REMOTEGB=(${REMOTEGB_LIST:-96})
 
-SWEEP_RATIO=(1)
+# Sets DRAM_READ/WRITE_RATIO and NUMA_READ/WRITE_RATIO to the same value.
+SWEEP_RATIO=(${RATIO_LIST:-1})
 
 
-SWEEP_THREADS=(32)
+SWEEP_THREADS=(${THREADS_LIST:-32})
 # tpcc: 1000 (defaul:warehouses), rndread: record count 1000000000
-SWEEP_DATASIZE=(1000)
-SWEEP_RUNFOR=(900)
+SWEEP_DATASIZE=(${DATASIZE_LIST:-1000})
+SWEEP_RUNFOR=(${RUNFOR_LIST:-900})
 
-SWEEP_PROMOTE_BATCH=(1)
-SWEEP_EVICT_BATCH=(1 256 1024)
+SWEEP_PROMOTE_BATCH=(${PROMOTE_BATCH_LIST:-1})
+SWEEP_EVICT_BATCH=(${EVICT_BATCH_LIST:-1 256 1024})
 
-SWEEP_RNDREAD=(0)
+SWEEP_RNDREAD=(${RNDREAD_LIST:-0})
 
-SWEEP_NUMA_MIGRATE_METHOD=(0 1 2 3)
-SWEEP_MOVE_PAGES2_MODE=(0)
+SWEEP_NUMA_MIGRATE_METHOD=(${NUMA_MIGRATE_METHOD_LIST:-0 1 2 3})
+SWEEP_MOVE_PAGES2_MODE=(${MOVE_PAGES2_MODE_LIST:-0})
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────
 # SSD Blocks 

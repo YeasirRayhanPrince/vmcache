@@ -5,12 +5,14 @@ set -euo pipefail
 # This script sweeps only the env vars that vmcache-leis.cpp understands
 # (the original 2-tier baseline: DRAM -> SSD, no NUMA tier).
 
-SWEEP_PHYSGB=(32)
-SWEEP_THREADS=(32)
-SWEEP_DATASIZE=(1000000000)
-SWEEP_RUNFOR=(900)
-SWEEP_BATCH=(64)
-SWEEP_RNDREAD=(1)
+# Override any of these from the environment with a space-separated list,
+# e.g.  DATASIZE_LIST=1000 RNDREAD_LIST=0 ./bench_sweep_leis.sh
+SWEEP_PHYSGB=(${PHYSGB_LIST:-32})
+SWEEP_THREADS=(${THREADS_LIST:-32})
+SWEEP_DATASIZE=(${DATASIZE_LIST:-1000000000})
+SWEEP_RUNFOR=(${RUNFOR_LIST:-900})
+SWEEP_BATCH=(${BATCH_LIST:-64})
+SWEEP_RNDREAD=(${RNDREAD_LIST:-1})
 
 # ── Fixed defaults (inherited unless overridden by sweep) ─────────────
 # SSD Blocks

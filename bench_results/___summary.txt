@@ -44,37 +44,37 @@ If we know the workload is fully in-memory, no locks, let it run wild during mig
 ----------------------------------------------------------------------------------------
 plots
 ----------------------------------------------------------------------------------------
-plot 1.1: python plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy --nm 3 --eb 256 --mp2m 0
-plot 1.2: python plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy --no-legend
+plot 1.1: python3 plots/plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy --nm 3 --eb 256 --mp2m 0
+plot 1.2: python3 plots/plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy --no-legend
 
 1.1 and 1.2:
-python3 plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy --nm 3 --eb 256 --mp2m 0 --subplot-w 0.8 --subplot-h 0.8
-python plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy --no-legend --subplot-w 0.8 --subplot-h 0.8
+python3 plots/plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy --nm 3 --eb 256 --mp2m 0 --subplot-w 0.8 --subplot-h 0.8
+python3 plots/plot_paper.py --sweep 20260213_235605 20260214_031931 --remo-label --logy --no-legend --subplot-w 0.8 --subplot-h 0.8
 
 Combined: 
-python3 plot_paper.py --panel-spec "--sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy \
+python3 plots/plot_paper.py --panel-spec "--sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --remo-label --logy \
   --nm 3 --eb 256 --mp2m 0 --subplot-w 0.6 --subplot-h 0.5" --panel-spec "--sweep 20260213_235605 20260214_031931 --remo-label \
   --logy --no-legend --subplot-w 0.6 --subplot-h 0.5" --outdir bench_plots --out vmcache_vs_vmcachen
 
 # breakdown
-plot 2.1: python plot_time_breakdown.py --sweep 20260213_130458 --mp2m 0 --rndread 0
-plot 2.2: python plot_time_breakdown.py --sweep 20260213_184542 
+plot 2.1: python3 plots/plot_time_breakdown.py --sweep 20260213_130458 --mp2m 0 --rndread 0
+plot 2.2: python3 plots/plot_time_breakdown.py --sweep 20260213_184542 
 
 # move_pages vs others 
-plot 3.1: python plot_paper.py --sweep 20260208_220148 20260212_002256 --eb 1 512 --nm 0 2 3 --remo 64 --mp2m 0 --nm-label --smooth 10 --logy
-plot 3.2: python plot_paper.py --sweep 20260214_150613 20260214_093124 20260214_150613 --nm-label --logy --eb 1 1024 --smooth 10 --no-legend
+plot 3.1: python3 plots/plot_paper.py --sweep 20260208_220148 20260212_002256 --eb 1 512 --nm 0 2 3 --remo 64 --mp2m 0 --nm-label --smooth 10 --logy
+plot 3.2: python3 plots/plot_paper.py --sweep 20260214_150613 20260214_093124 20260214_150613 --nm-label --logy --eb 1 1024 --smooth 10 --no-legend
 
-python3 plot_paper.py --panel-spec "--sweep 20260208_220148 20260212_002256 --eb 1 512 --nm 0 2 3 --remo 64 --mp2m 0 --nm-label --smooth 10 --logy --subplot-w 0.6 --subplot-h 0.5" --panel-spec "--sweep 20260214_150613 20260214_093124 20260214_150613 --nm-label --logy --eb 1 1024 --smooth 10 --no-legend --subplot-w 0.6 --subplot-h 0.5" --outdir bench_plots --out syscalls
+python3 plots/plot_paper.py --panel-spec "--sweep 20260208_220148 20260212_002256 --eb 1 512 --nm 0 2 3 --remo 64 --mp2m 0 --nm-label --smooth 10 --logy --subplot-w 0.6 --subplot-h 0.5" --panel-spec "--sweep 20260214_150613 20260214_093124 20260214_150613 --nm-label --logy --eb 1 1024 --smooth 10 --no-legend --subplot-w 0.6 --subplot-h 0.5" --outdir bench_plots --out syscalls
 
 # ablation
-plot 4.1: python plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 --batch-label --nm 3 --mp2m 0 1 2 --logy
-plot 4.2: python plot_paper.py --sweep 20260216_065847 20260216_232913 --mig-flag --logy
+plot 4.1: python3 plots/plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 --batch-label --nm 3 --mp2m 0 1 2 --logy
+plot 4.2: python3 plots/plot_paper.py --sweep 20260216_065847 20260216_232913 --mig-flag --logy
 
 
 
-[tpc-c]python plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --batch-label --nm 3 --mp2m 0 1 2 --logy
+[tpc-c]python3 plots/plot_paper.py --sweep 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --batch-label --nm 3 --mp2m 0 1 2 --logy
 
-python plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --batch-label --nm 3 --mp2m 0 1 2 --logy
+python3 plots/plot_paper.py --sweep 20260214_093124 20260214_185545 20260214_194940 20260208_220148 20260211_075226 20260211_085603 20260212_002256 --batch-label --nm 3 --mp2m 0 1 2 --logy
 
 
   ┌─────┬─────────────────┬─────────────────┬──────────────────┬─────────────────┬──────────────────┬────────┬──────────┐
