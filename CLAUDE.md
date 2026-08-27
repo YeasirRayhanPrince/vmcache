@@ -53,6 +53,43 @@ from the CWD, not from `__file__`.
 `bench_results/___summary.txt` records which command produced which figure. It
 is the only such record; keep it updated.
 
+## Live labs (onboarding)
+
+Interactive walkthroughs of the buffer manager — the fastest way to get someone
+new oriented before they read the C++.
+
+| Lab | Link | Source |
+| --- | --- | --- |
+| `vmcache-leis` — 2-tier | [live lab](https://claude.ai/code/artifact/099ad77d-fa73-4138-b11f-62f998864039) | `_scratch/vmcache_leis_lab.html` |
+| `vmcache-n` — 3-tier | [live lab](https://claude.ai/code/artifact/dbc7bc76-e558-4faa-a0c7-fc0d8cd55e2b) | `_scratch/vmcache_n_lab.html` |
+
+Both step a transaction through the B-tree descent (metadata → root → inner →
+leaf) and show, per page: check state → make room → fetch → use it.
+
+Identical controls in both, so you learn the interface once:
+
+- **Step ▸** runs one transaction operation; **Run** plays the whole thing;
+  **Auto** draws transactions against the real TPC-C mix.
+- **❚❚ Pause** (or `Space`) stops mid-flight — mid-descent, mid-eviction, even
+  mid page-animation — and resumes exactly there.
+- **◀ ▶** (or `←` `→`) step through every recorded state; the **scrubber** slides
+  through them; **clicking a numbered plan chip jumps straight to that step**.
+  The readout shows `23/51 · op 4` — position in the recording, and which
+  transaction step it belongs to.
+- **Speed** is Slow / Normal / Fast. Shrink the pools to force eviction.
+
+The 2-tier lab has three bands (virtual address space, DRAM frames, device). The
+3-tier lab adds a remote-memory band and exposes `DRAM_READ_RATIO`,
+`NUMA_READ_RATIO`, `PROMOTE_BATCH` and `NUMA_MIGRATE_METHOD` as live controls —
+switching the migration method between per-page (0, 1) and batched (2, 3) shows
+the syscall count collapse for the same number of pages moved, which is the
+`move_pages2` argument in one number. Set REMOTE to 0 to collapse it to 2-tier.
+
+Two caveats: artifacts are **private until shared** from the page's share menu,
+and the lab sources currently live in the gitignored `_scratch/`, so they do not
+travel with a clone. Move them to a tracked `labs/` directory if they are meant
+to be part of the handoff.
+
 ## Gotchas
 
 - **The baseline label comes from an absent key.** `plot_paper.py:140` labels a
